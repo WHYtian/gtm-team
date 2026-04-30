@@ -636,7 +636,8 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 # Hard constraint 0: run Data Synthesizer before the very first analyst call
                 # if user-uploaded RAG data exists (no-op if no user docs).
                 if action == "CALL_ANALYST" and not analyst_called and not validator_called:
-                    if _get_user_rag_chunks():  # quick check: any user docs ingested?
+                    has_user_docs = await loop.run_in_executor(None, _get_user_rag_chunks)
+                    if has_user_docs:
                         action = "CALL_VALIDATOR"
                         param  = "Reconcile web search findings with imported knowledge base."
 
@@ -669,8 +670,8 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
             # Step 1: extract all researcher findings (full list, not digest-truncated)
             all_findings = _extract_finding_texts(workspace)
 
-            # Step 2: get user RAG chunks (test files excluded)
-            rag_chunks = _get_user_rag_chunks()
+            # Step 2: get user RAG chunks (test files excluded) — run in executor (sync ChromaDB call)
+            rag_chunks = await loop.run_in_executor(None, _get_user_rag_chunks)
 
             if all_findings and rag_chunks:
                 # Step 3: embedding-based pre-filter (pure numpy, no LLM)
