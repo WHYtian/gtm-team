@@ -4,6 +4,7 @@ RAG Manager — LlamaIndex + ChromaDB + HuggingFace local embeddings.
 v2: namespace support for user/platform data isolation, batch ingest, metadata-filtered retrieval.
 """
 import io
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -22,7 +23,7 @@ DB_PATH.mkdir(parents=True, exist_ok=True)
 EMBED_MODEL = "all-MiniLM-L6-v2"
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 64
-SIMILARITY_CUTOFF = 0.35
+SIMILARITY_CUTOFF = 0.25
 
 # ── Namespace constants ─────────────────────────────────────────────────────────
 NAMESPACE_USER     = "user"
@@ -94,6 +95,58 @@ def _text_quality_ratio(text: str) -> float:
 MIN_TEXT_QUALITY = 0.85
 
 
+def _tabular_to_sentences(text: str) -> str:
+    """Convert markdown table text into natural language sentences for better embeddings.
+
+    Markdown tables embed poorly with sentence-transformer models because:
+    - Pipe characters add noise
+    - SentenceSplitter cuts mid-table, orphaning values from their column headers
+
+    Converts each data row into a self-contained sentence like:
+      "Year: 2025. Market: Global Cloud Software. Size_Billion_USD: 285. Source: IDC."
+    so every chunk is independently interpretable.
+
+    Returns the original text unchanged if it doesn't look like a markdown table.
+    """
+    lines = [ln.rstrip() for ln in text.strip().splitlines()]
+    # Detect markdown table: needs a header row and a separator row (|---|)
+    table_lines = [ln for ln in lines if ln.startswith('|')]
+    if len(table_lines) < 3:
+        return text  # not a markdown table
+
+    sep_idx = next(
+        (i for i, ln in enumerate(table_lines)
+         if re.match(r'^\|[\s\-|]+\|$', ln)), None)
+    if sep_idx is None:
+        return text
+
+    # Parse header
+    header_row = table_lines[sep_idx - 1] if sep_idx > 0 else table_lines[0]
+    headers = [h.strip() for h in header_row.strip('|').split('|')]
+
+    # Convert each data row to a sentence
+    sentences = []
+    for ln in table_lines[sep_idx + 1:]:
+        cells = [c.strip() for c in ln.strip('|').split('|')]
+        if not any(cells):
+            continue
+        parts = []
+        for h, c in zip(headers, cells):
+            if c:
+                parts.append(f"{h}: {c}")
+        if parts:
+            sentences.append(". ".join(parts) + ".")
+
+    if not sentences:
+        return text
+
+    # Keep non-table lines (e.g. title/notes above the table) as-is
+    prose_lines = [ln for ln in lines if not ln.startswith('|')]
+    prefix = "\n".join(prose_lines).strip()
+    body = "\n".join(sentences)
+    return (prefix + "\n\n" + body).strip() if prefix else body
+
+
 def _dedup_document(filename: str, namespace: str) -> int:
     """Delete all chunks for a given filename+namespace combo. Returns count deleted."""
     chroma = _get_chroma_client()
@@ -141,6 +194,11 @@ def ingest_document(
             "error": f"content appears to be binary (text quality: {quality:.1%}, min: {MIN_TEXT_QUALITY:.0%})",
             "filename": filename,
         }
+
+    # Convert markdown tables → natural language sentences before chunking.
+    # Structured files (CSV/XLSX/JSON) arrive as markdown tables from doc_import_bytes;
+    # sentence form embeds far better with all-MiniLM-L6-v2.
+    content = _tabular_to_sentences(content)
 
     # Deduplicate: replace existing document with same filename + namespace
     _dedup_document(filename, namespace)
