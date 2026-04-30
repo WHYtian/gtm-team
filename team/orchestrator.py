@@ -164,17 +164,40 @@ def _parse_react(text: str) -> tuple[str, str, str]:
 
 # ── Workspace helpers ─────────────────────────────────────────────────────────
 
+def _researcher_digest(output: str) -> str:
+    """Compact key-findings digest for supervisor workspace view.
+
+    Extracts every confidence-tagged finding line and the final signal so the
+    supervisor always sees what was found regardless of how long the raw output is.
+    """
+    lines = []
+    for line in output.split('\n'):
+        stripped = line.strip()
+        if re.search(r'\[(Data|Estimate|Claim)\]', stripped, re.IGNORECASE) and len(stripped) > 10:
+            lines.append('  • ' + stripped[:180])
+    sig_match = re.search(r'\[RESEARCH[^\]]*\]', output, re.IGNORECASE)
+    sig = sig_match.group(0) if sig_match else ""
+    digest = '\n'.join(lines[:10])
+    if digest:
+        return f"KEY FINDINGS:\n{digest}\nSIGNAL: {sig}"
+    return f"SIGNAL: {sig}" if sig else "(no findings)"
+
+
 def _workspace_text(workspace: list) -> str:
     if not workspace:
         return "(empty — no work done yet)"
     n = len(workspace)
     parts = []
     for i, w in enumerate(workspace):
-        if i >= n - 3:
+        if w["agent"] == "researcher":
+            # Always show a compact digest — never truncate researcher findings
+            out = _researcher_digest(w["output"])
+        elif i >= n - 3:
             limit = 1000 if w["agent"] == "critic" else 700
+            out = w["output"][:limit] + ("..." if len(w["output"]) > limit else "")
         else:
             limit = 180
-        out = w["output"][:limit] + ("..." if len(w["output"]) > limit else "")
+            out = w["output"][:limit] + ("..." if len(w["output"]) > limit else "")
         sig = f"\n  └─ signal: {w['signal']}" if w.get("signal") else ""
         parts.append(
             f"[Round {w['round']}] {w['agent'].upper()}{sig}\n"
@@ -662,18 +685,26 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         f"Research topic: {topic}\n"
                         f"Research directive: {directive}\n\n"
                         f"List specific web search queries to cover this directive.\n"
-                        f"SCALE to the task: 3-4 queries for narrow directives (specific company names, single metric);\n"
-                        f"6-8 queries for broad dimension directives (full market overview, competitive landscape).\n"
-                        f"If directive names specific companies, generate one focused query per company "
-                        f"(e.g. 'Workday revenue 2025', 'BambooHR pricing 2025') — do NOT use 'top N vendors' phrasing.\n"
+                        f"ENTITY COVERAGE RULE (mandatory):\n"
+                        f"  1. Count every distinct entity in the directive: each named company, "
+                        f"industry, or specific metric counts as one entity.\n"
+                        f"  2. Generate EXACTLY ONE query per entity — the single most searchable "
+                        f"query for it (e.g. 'Workday revenue 2025'). "
+                        f"Never generate 2 queries for the same entity.\n"
+                        f"  3. Add market-level queries (size, CAGR) ONLY if the directive "
+                        f"explicitly requests market size or growth rate data.\n"
+                        f"  4. Total queries = number of entities + market queries (if requested). "
+                        f"No arbitrary cap — ensure every entity is covered.\n"
+                        f"Example: directive names 6 companies → 6 queries, one per company.\n"
                         f"Include '2025' or '2026' in queries where current data is needed.\n"
-                        f"Format: one search query per line, keywords only (max 12 words each), no bullets or numbers.",
-                        max_tokens=300, remember=False)
+                        f"Format: one search query per line, keywords only (max 12 words each), "
+                        f"no bullets or numbers.",
+                        max_tokens=400, remember=False)
                     queries = [
                         ln.strip().lstrip("•-0123456789.) ")
                         for ln in decompose_raw.split("\n")
                         if ln.strip() and not ln.strip().startswith("#") and len(ln.strip()) > 5
-                    ][:8]
+                    ][:16]  # raised from 8 → 16 to accommodate large entity lists
                 except AgentCallError:
                     queries = []
                 if not queries:
@@ -759,8 +790,12 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
 
                     return s
 
-                query_summaries = await asyncio.gather(
-                    *[_summarize_query(sr) for sr in all_sr_list])
+                # Step 3: summarise in serial batches of 4 (mirrors web search batching)
+                query_summaries: list[str] = []
+                for i in range(0, len(all_sr_list), 4):
+                    batch_sums = await asyncio.gather(
+                        *[_summarize_query(sr) for sr in all_sr_list[i:i + 4]])
+                    query_summaries.extend(batch_sums)
 
                 all_outputs, sig = [], ""
                 for s in query_summaries:
