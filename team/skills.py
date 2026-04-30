@@ -58,6 +58,35 @@ async def web_scrape(url: str) -> str:
     return result.get("text") or result.get("raw", "")[:2000]
 
 
+async def doc_import(filepath: str) -> dict:
+    """Async wrapper: parse any supported document format via document-import skill."""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None, lambda: _run("document-import/scripts/doc_import.py", [filepath])
+    )
+    return result
+
+
+async def doc_import_bytes(filename: str, content: bytes) -> dict:
+    """Parse document from raw bytes (used by API uploads)."""
+    loop = asyncio.get_event_loop()
+
+    def _run_bytes():
+        import subprocess
+        script = str(SKILLS / "document-import/scripts/doc_import.py")
+        r = subprocess.run(
+            [PYTHON, script, filename, "--bytes"],
+            input=content, capture_output=True, text=False, timeout=30,
+            env={**os.environ, "HOME": str(Path.home())},
+        )
+        try:
+            return json.loads(r.stdout.decode("utf-8").strip())
+        except json.JSONDecodeError:
+            return {"error": r.stderr.decode("utf-8")[:300] or "no output", "filename": filename}
+
+    return await loop.run_in_executor(None, _run_bytes)
+
+
 async def gather_dimension(topic: str, dimension: str, query_suffix: str) -> dict:
     """
     Search + scrape for one research dimension. Returns dict with dim + text.

@@ -1,0 +1,46 @@
+{
+  "report_title": "Worldwide Public Cloud Services Revenue & Forecast",
+  "data_source": "IDC Worldwide Semiannual Public Cloud Services Tracker, 2025",
+  "last_updated": "2025-07-15",
+  "total_market": {
+    "2024_revenue_billion_usd": 315.0,
+    "2025_forecast_billion_usd": 372.0,
+    "2028_forecast_billion_usd": 625.0,
+    "cagr_2024_2028_pct": 18.7
+  },
+  "segments": [
+    {
+      "name": "SaaS - Applications",
+      "2024_revenue_billion_usd": 143.0,
+      "2025_forecast_billion_usd": 162.0,
+      "cagr_pct": 13.3,
+      "leading_vendors": ["Salesforce", "Microsoft", "Workday", "ServiceNow", "SAP"]
+    },
+    {
+      "name": "SaaS - System Infrastructure (IaaS)",
+      "2024_revenue_billion_usd": 108.0,
+      "2025_forecast_billion_usd": 138.0,
+      "cagr_pct": 27.8,
+      "leading_vendors": ["AWS", "Microsoft Azure", "Google Cloud", "Alibaba Cloud"]
+    },
+    {
+      "name": "PaaS",
+      "2024_revenue_billion_usd": 64.0,
+      "2025_forecast_billion_usd": 72.0,
+      "cagr_pct": 12.5,
+      "leading_vendors": ["AWS", "Microsoft", "Google Cloud", "Salesforce", "Oracle"]
+    }
+  ],
+  "regional_split_2024": {
+    "North_America": 52.3,
+    "Western_Europe": 21.8,
+    "Asia_Pacific_incl_Japan": 18.5,
+    "Rest_of_World": 7.4
+  },
+  "key_trends": [
+    "AI platform services (AI PaaS) growing at 38% CAGR, fastest sub-segment",
+    "Industry cloud vertical solutions accelerating (healthcare, financial services, manufacturing)",
+    "Hyperscaler market share: AWS 31%, Azure 24%, Google Cloud 12%, others 33%",
+    "SaaS consolidation: top 10 vendors now control 42% of SaaS market (up from 32% in 2020)"
+  ]
+}
