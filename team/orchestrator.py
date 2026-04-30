@@ -475,6 +475,15 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
             await emit(react_supervisor,
                 f"🔬 **Round {rnd}:** Verifying disputed claim — {param[:120]}", "routing")
 
+        elif researcher_calls == 0 and "CALL_RESEARCHER" in valid:
+            # Forced: first ever researcher call is always the 4-dim initial search
+            action    = "CALL_RESEARCHER"
+            param     = "initial"
+            think_txt = ""
+            await emit(react_supervisor,
+                "▶ Calling **Alex (Researcher)** — Initial broad research across 4 dimensions",
+                "routing")
+
         elif len(valid) == 1:
             # Forced: only one valid action (ANALYSIS / CRITIQUE / WRITE)
             action    = valid[0]
