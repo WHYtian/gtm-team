@@ -161,26 +161,24 @@ def _workspace_text(workspace: list) -> str:
 def _build_ctx_for(agent_id: str, workspace: list) -> list[dict]:
     """
     Build curated extra_context for analyst / critic.
-    Analyst sees ALL researcher rounds (early baseline + latest gap-fill).
-    Critic sees full analyst output + all researcher rounds for cross-checking.
+    Full outputs are passed — no truncation — to prevent context blindness.
+    The lightweight [:600] fallback is retained only for the supervisor routing path.
     """
     if agent_id == "analyst":
         msgs = []
-        researchers = [w for w in workspace if w["agent"] == "researcher"]
-        for i, r in enumerate(researchers):
-            limit = 2000 if i == len(researchers) - 1 else 600
+        for r in (w for w in workspace if w["agent"] == "researcher"):
             msgs.append({"role": "user",
-                         "content": f"[RESEARCH Round {r['round']}]\n{r['output'][:limit]}"})
+                         "content": f"[RESEARCH Round {r['round']}]\n{r['output']}"})
         critics = [w for w in workspace if w["agent"] == "critic"]
         if critics:
             c = critics[-1]
             msgs.append({"role": "user",
-                         "content": f"[CRITIC FEEDBACK — Round {c['round']}]\n{c['output'][:1200]}"})
+                         "content": f"[CRITIC FEEDBACK — Round {c['round']}]\n{c['output']}"})
         analysts = [w for w in workspace if w["agent"] == "analyst"]
         if analysts:
             a = analysts[-1]
             msgs.append({"role": "user",
-                         "content": f"[YOUR PREVIOUS ANALYSIS — Round {a['round']}]\n{a['output'][:1000]}"})
+                         "content": f"[YOUR PREVIOUS ANALYSIS — Round {a['round']}]\n{a['output']}"})
         return msgs
 
     elif agent_id == "critic":
@@ -189,14 +187,13 @@ def _build_ctx_for(agent_id: str, workspace: list) -> list[dict]:
         if analysts:
             a = analysts[-1]
             msgs.append({"role": "user",
-                         "content": f"[ANALYST'S ANALYSIS — Round {a['round']}]\n{a['output'][:2500]}"})
-        researchers = [w for w in workspace if w["agent"] == "researcher"]
-        for i, r in enumerate(researchers):
-            limit = 800 if i == len(researchers) - 1 else 300
+                         "content": f"[ANALYST'S ANALYSIS — Round {a['round']}]\n{a['output']}"})
+        for r in (w for w in workspace if w["agent"] == "researcher"):
             msgs.append({"role": "user",
-                         "content": f"[RESEARCH Round {r['round']}]\n{r['output'][:limit]}"})
+                         "content": f"[RESEARCH Round {r['round']}]\n{r['output']}"})
         return msgs
 
+    # Supervisor routing fallback — keep lightweight
     return [{"role": "user",
              "content": f"[{w['agent'].upper()} — Round {w['round']}]\n{w['output'][:600]}"}
             for w in workspace[-5:]]
@@ -472,20 +469,16 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
         # ── WRITER ───────────────────────────────────────────────────────────
         if action == "CALL_WRITER":
             _writer_ctx = []
-            _rs = [w for w in workspace if w["agent"] == "researcher"]
-            if _rs:
+            for _r in (w for w in workspace if w["agent"] == "researcher"):
                 _writer_ctx.append({"role": "user",
-                                    "content": f"[RESEARCH BASELINE]\n{_rs[0]['output'][:800]}"})
-            if len(_rs) > 1:
-                _writer_ctx.append({"role": "user",
-                                    "content": f"[RESEARCH LATEST]\n{_rs[-1]['output'][:600]}"})
+                                    "content": f"[RESEARCH Round {_r['round']}]\n{_r['output']}"})
             for w in workspace:
                 if w["agent"] == "analyst":
                     _writer_ctx.append({"role": "user",
-                                        "content": f"[ANALYST]\n{w['output'][:1500]}"})
+                                        "content": f"[ANALYST]\n{w['output']}"})
                 elif w["agent"] == "critic":
                     _writer_ctx.append({"role": "user",
-                                        "content": f"[CRITIC]\n{w['output'][:800]}"})
+                                        "content": f"[CRITIC]\n{w['output']}"})
 
             rag_note = f"\n\nKNOWLEDGE BASE:\n{rag_context[:800]}" if rag_context else ""
             try:
