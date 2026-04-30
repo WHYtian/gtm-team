@@ -23,8 +23,9 @@ from team.skills import gather_dimension, web_search, web_scrape
 REPORTS_DIR = Path.home() / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 
-MAX_ROUNDS           = 40   # absolute backstop — emergency writer fires if hit
-MAX_RESEARCHER_CALLS = 3    # hard ceiling; supervisor sees budget and decides earlier
+MAX_ROUNDS                  = 40  # absolute backstop — emergency writer fires if hit
+MAX_RESEARCHER_CALLS        = 3   # pre-analyst exploratory ceiling
+MAX_POST_ANALYST_RESEARCHER = 2   # post-analyst targeted gap-fill ceiling (independent budget)
 
 _SUPV = "doubao-seed-2-0-pro-260215"
 
@@ -50,15 +51,21 @@ TEAM:
 ━━━ DATA RECENCY ━━━
 The current year is 2026. Prioritize 2025/2026 data. Fall back to 2024 or earlier only when unavailable.
 
+━━━ RESEARCHER BUDGETS ━━━
+You have TWO independent researcher budgets:
+  Pre-analyst  (exploratory): 3 calls — used before analyst runs; covers broad dimensions.
+  Post-analyst (gap-fill):    2 calls — used after analyst or critic flags specific missing data;
+                                        targeted single-metric or single-company searches only.
+
 ━━━ NATURAL PROGRESSION ━━━
-1. RESEARCH — initial 4-dim search runs automatically. You have at most 2 follow-up calls.
+1. RESEARCH — initial 4-dim search runs automatically (uses 1 pre-analyst call).
+   You have 2 more pre-analyst follow-up calls.
    ADVANCEMENT RULE: Call CALL_ANALYST only when workspace contains BOTH:
      (a) a cited dollar market size or revenue figure (e.g. "$9.4B", "CAGR 14%"), AND
      (b) at least one named competitor with a specific quantitative metric (revenue, market share %, user count).
-   If only (a) is satisfied → use one follow-up call targeting competitive data.
-   If only (b) is satisfied → use one follow-up call targeting market size.
-   If neither is satisfied → use one follow-up call covering both gaps in one broad directive.
-   Once BOTH conditions are met, advance immediately regardless of other gaps.
+   If only (a) is satisfied → one pre-analyst follow-up targeting competitive data.
+   If only (b) is satisfied → one pre-analyst follow-up targeting market size.
+   Once BOTH conditions are met, advance to analyst immediately.
 
 2. CALL_ANALYST — runs full frameworks, labels every figure. Handles missing data with [N/A] or [Estimate].
 
@@ -78,8 +85,12 @@ If researcher returns [RESEARCH: WEAK] but has any citable finding → sufficien
 ━━━ CRITIC ROUTING ━━━
 After [VERDICT: NEEDS_REVISION]:
   reason: logic_error  → CALL_ANALYST to fix the framework or arithmetic
-  reason: missing_data, AND metric NOT in workspace as UNAVAILABLE → CALL_RESEARCHER (one targeted follow-up)
-  reason: missing_data, AND metric IS UNAVAILABLE in workspace → CALL_ANALYST (label it [N/A], do not re-search)
+  reason: missing_data, AND metric NOT UNAVAILABLE in workspace → CALL_RESEARCHER (post-analyst budget)
+  reason: missing_data, AND metric IS UNAVAILABLE in workspace → CALL_ANALYST (label [N/A], do not re-search)
+
+After [VERDICT: REJECT_DATA]:
+  → CALL_RESEARCHER (post-analyst budget) to find an alternative source for the rejected figure.
+  → If post-analyst budget exhausted → CALL_ANALYST to reclassify as [Assumption] or [N/A].
 
 ━━━ FOLLOW-UP SEARCH STRATEGY ━━━
 When using a follow-up researcher call, choose the angle most likely to yield new data:
@@ -94,10 +105,12 @@ ACT: CALL_CRITIC     | task: [what to focus on]
 ACT: CALL_WRITER     | task: write final report
 
 ━━━ RESEARCHER TASK RULES ━━━
-- Provide a broad DIRECTIVE, not individual queries. Researcher self-decomposes into 6-8 targeted searches.
-- Make directives wide enough to cover a full dimension in one call.
+- Provide a DIRECTIVE (topic + angle). Researcher self-decomposes into queries automatically.
 - All sources are fair game — paywalled sources (Gartner, IDC, Forrester, Statista, Mordor Intelligence, etc.)
   often expose headline figures in search snippets; researcher will cite them with (snippet only) notation.
+- NAMED COMPANIES RULE: if the workspace already lists specific company names, include those names
+  explicitly in the directive. Do NOT use generic phrases like "top 5 vendors" or "top N players" —
+  these generate un-searchable queries. Use actual names: "Workday, BambooHR, Gusto revenue 2025".
 
 ━━━ DATA CONFLICT ━━━
 Two rounds with 10×+ different figures → note in THINK, instruct analyst to use conservative figure and flag conflict.
@@ -112,7 +125,7 @@ Respond in the same language as the topic.\
 REACT_PROMPT = """\
 Research topic: {topic}
 Round: {rnd}/{max_rounds}
-Researcher calls: {research_count}/{max_researcher_calls}{budget_warn}
+Pre-analyst researcher: {research_count}/{max_researcher_calls} | Post-analyst gap-fills: {post_analyst_count}/{max_post_analyst}{budget_warn}
 Analyst called: {analyst_called} | Analyst revisions: {revision_count} | Critic called: {critic_called}
 
 Previously searched (do NOT repeat):
@@ -367,12 +380,13 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
             cache_hit["report"], cache_hit["entry_id"], cache_hit["age_days"])
 
     # ── State ─────────────────────────────────────────────────────────────────
-    workspace:       list[dict] = []
-    rag_context      = ""
-    researcher_calls = 0
-    analyst_called   = False
-    revision_count   = 0
-    final_report     = ""
+    workspace:                    list[dict] = []
+    rag_context                   = ""
+    researcher_calls              = 0
+    post_analyst_researcher_calls = 0
+    analyst_called                = False
+    revision_count                = 0
+    final_report                  = ""
 
     await emit(react_supervisor,
         f"🚀 **Starting: {topic}**\n\n"
@@ -397,21 +411,26 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 "routing")
 
         elif researcher_calls >= MAX_RESEARCHER_CALLS and not analyst_called:
-            # Hard safety: budget exhausted but analyst never ran — force it
+            # Hard safety: pre-analyst budget exhausted but analyst never ran — force it
             action    = "CALL_ANALYST"
-            param     = ("Researcher budget exhausted. Analyse all collected data using "
+            param     = ("Pre-analyst researcher budget exhausted. Analyse all collected data using "
                          "TAM/SAM/SOM, PESTEL, Porter's Five Forces. "
                          "Label every figure [Data], [Estimate], or [Assumption].")
             think_txt = ""
             await emit(react_supervisor,
-                f"⏰ Researcher budget ({MAX_RESEARCHER_CALLS} calls) exhausted — routing to analyst.",
+                f"⏰ Pre-analyst researcher budget ({MAX_RESEARCHER_CALLS} calls) exhausted — routing to analyst.",
                 "routing")
 
         else:
             # ── Supervisor decides freely ─────────────────────────────────────
-            budget_remaining = MAX_RESEARCHER_CALLS - researcher_calls
-            budget_warn = (f" ⚠️ {budget_remaining} researcher call(s) left — consider advancing"
-                           if budget_remaining <= 2 else "")
+            if analyst_called:
+                post_remaining = MAX_POST_ANALYST_RESEARCHER - post_analyst_researcher_calls
+                budget_warn = (f" ⚠️ {post_remaining} post-analyst gap-fill(s) left"
+                               if post_remaining <= 1 else "")
+            else:
+                pre_remaining = MAX_RESEARCHER_CALLS - researcher_calls
+                budget_warn = (f" ⚠️ {pre_remaining} pre-analyst call(s) left — consider advancing"
+                               if pre_remaining <= 1 else "")
 
             critic_called = any(w["agent"] == "critic" for w in workspace)
 
@@ -430,6 +449,8 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         budget_warn=budget_warn,
                         research_count=researcher_calls,
                         max_researcher_calls=MAX_RESEARCHER_CALLS,
+                        post_analyst_count=post_analyst_researcher_calls,
+                        max_post_analyst=MAX_POST_ANALYST_RESEARCHER,
                         analyst_called="Yes" if analyst_called else "No",
                         revision_count=revision_count,
                         critic_called="Yes" if critic_called else "No",
@@ -449,10 +470,17 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 think_txt = ""
             else:
                 think_txt, action, param = _parse_react(react_raw)
-                # Hard constraint 1: can't call researcher if budget is gone
-                if action == "CALL_RESEARCHER" and researcher_calls >= MAX_RESEARCHER_CALLS:
-                    action = "CALL_ANALYST" if not analyst_called else "CALL_WRITER"
-                    param  = "Researcher budget exhausted — proceeding with available data."
+                # Hard constraint 1: enforce researcher budget limits
+                if action == "CALL_RESEARCHER":
+                    pre_exhausted  = not analyst_called and researcher_calls >= MAX_RESEARCHER_CALLS
+                    post_exhausted = analyst_called and post_analyst_researcher_calls >= MAX_POST_ANALYST_RESEARCHER
+                    if pre_exhausted:
+                        action = "CALL_ANALYST"
+                        param  = "Pre-analyst researcher budget exhausted — proceeding to analysis."
+                    elif post_exhausted:
+                        action = "CALL_ANALYST"
+                        param  = ("Post-analyst gap-fill budget exhausted. "
+                                  "Label any remaining missing metrics as [N/A] or derive [Estimate].")
                 # Hard constraint 2: critic must run after every analyst before writer
                 if action == "CALL_WRITER" and analyst_called:
                     last_analyst_rnd = max(
@@ -473,9 +501,9 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 await emit(react_supervisor, think_txt, "thinking", is_think=True)
 
             _labels = {
-                "CALL_RESEARCHER": f"Calling **Alex (Researcher)** — {param[:160]}",
-                "CALL_ANALYST":    f"Calling **Jamie (Analyst)** — {param[:160]}",
-                "CALL_CRITIC":     f"Calling **Morgan (Critic)** — {param[:160]}",
+                "CALL_RESEARCHER": f"Calling **Alex (Researcher)** — {param}",
+                "CALL_ANALYST":    f"Calling **Jamie (Analyst)** — {param}",
+                "CALL_CRITIC":     f"Calling **Morgan (Critic)** — {param}",
                 "CALL_WRITER":     "Calling **Report Writer** — producing final report",
             }
             await emit(react_supervisor,
@@ -527,6 +555,8 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
         # ── RESEARCHER ────────────────────────────────────────────────────────
         elif action == "CALL_RESEARCHER":
             researcher_calls += 1
+            if analyst_called:
+                post_analyst_researcher_calls += 1
 
             if researcher_calls == 1:
                 # Initial parallel search across 4 dimensions
@@ -631,10 +661,14 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     decompose_raw = await researcher.speak(
                         f"Research topic: {topic}\n"
                         f"Research directive: {directive}\n\n"
-                        f"List 6-8 specific web search queries to cover this directive comprehensively.\n"
-                        f"Include '2025' in queries where current data is needed.\n"
+                        f"List specific web search queries to cover this directive.\n"
+                        f"SCALE to the task: 3-4 queries for narrow directives (specific company names, single metric);\n"
+                        f"6-8 queries for broad dimension directives (full market overview, competitive landscape).\n"
+                        f"If directive names specific companies, generate one focused query per company "
+                        f"(e.g. 'Workday revenue 2025', 'BambooHR pricing 2025') — do NOT use 'top N vendors' phrasing.\n"
+                        f"Include '2025' or '2026' in queries where current data is needed.\n"
                         f"Format: one search query per line, keywords only (max 12 words each), no bullets or numbers.",
-                        max_tokens=250, remember=False)
+                        max_tokens=300, remember=False)
                     queries = [
                         ln.strip().lstrip("•-0123456789.) ")
                         for ln in decompose_raw.split("\n")
