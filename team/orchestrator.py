@@ -47,14 +47,19 @@ TEAM:
   CALL_CRITIC     — Morgan: quality review
   CALL_WRITER     — Report Writer: final GTM Intelligence Report with Competitive Battle Cards
 
+━━━ DATA RECENCY ━━━
+Always prioritize 2025 data. Request 2024 or earlier only when 2025 is unavailable.
+Add "2025" to research directives where relevant.
+
 ━━━ NATURAL PROGRESSION (not enforced — your judgement) ━━━
 1. RESEARCH — 2-3 calls is the norm. Initial 4-dim search covers the baseline.
    One or two follow-ups to fill key gaps, then move to analyst.
-   If a metric failed 2 searches → not freely available; move on. Analyst will estimate.
+   Each CALL_RESEARCHER covers an ENTIRE dimension (6-8 searches internally).
+   If a dimension returned no useful data → PIVOT to a different angle. Do not retry the same thing.
 
 2. CALL_ANALYST — runs frameworks, produces full analysis with confidence labels.
 
-3. CALL_CRITIC — one quality pass.
+3. CALL_CRITIC — one quality pass. MANDATORY before writer.
    After critique: if analysis is solid or concerns are minor → go straight to CALL_WRITER.
    Only loop back to CALL_ANALYST for a genuine structural error (wrong framework, major unsupported claim).
    Do not loop for missing data points — analyst handles those with estimates.
@@ -72,16 +77,18 @@ GAPS: what's still missing
 DECISION: next action and why now
 
 ━━━ ACT FORMAT ━━━
-ACT: CALL_RESEARCHER | queries: q1 || q2 || q3
+ACT: CALL_RESEARCHER | task: [research directive — which dimension/gap to cover, e.g. "competitive landscape: top vendors pricing market share 2025"]
 ACT: CALL_ANALYST    | task: [frameworks to apply + what to address]
 ACT: CALL_CRITIC     | task: [what to focus on]
 ACT: CALL_WRITER     | task: write final report
 
-━━━ RESEARCHER QUERY RULES ━━━
-- Keywords only, max 12 words per sub-query, separated by ||
-- Each || sub-query fires as a separate parallel search and gets its own bubble
+━━━ RESEARCHER TASK RULES ━━━
+- Provide a research DIRECTIVE (topic + angle), NOT individual search queries
+- Example: "market size CAGR 2025: global cloud CRM revenue forecast"
+- Researcher will self-decompose into 6-8 specific searches and run them all
+- One CALL_RESEARCHER = one full research dimension — plan broadly, not narrowly
+- PIVOT: if a dimension returned no useful data → request a completely different angle
 - Avoid paywalled sources: Gartner, IDC, McKinsey, Forrester, Statista
-- PIVOT: if a metric failed 2+ prior searches → search something different entirely
 
 ━━━ DATA CONFLICT ━━━
 Two rounds with 10×+ different figures for the same metric → note in THINK, \
@@ -289,7 +296,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                       "critic": critic,         "writer": writer}
     phase_map      = {"researcher": "research", "analyst": "analysis",
                       "critic": "critique",     "writer": "writing"}
-    max_tokens_map = {"researcher": 900, "analyst": 1000, "critic": 900, "writer": 3000}
+    max_tokens_map = {"researcher": 900, "analyst": 1800, "critic": 900, "writer": 3000}
     team_messages: list[dict] = []
 
     loop = asyncio.get_event_loop()
@@ -397,10 +404,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
             searched_parts = []
             for w in workspace:
                 if w["agent"] == "researcher" and w.get("task") and w["task"] != "initial":
-                    for sq in w["task"].split("||"):
-                        sq = sq.strip()
-                        if sq:
-                            searched_parts.append(f"  • {sq[:120]}")
+                    searched_parts.append(f"  • {w['task'][:120]}")
             searched_block = "\n".join(searched_parts) or "  (none yet)"
 
             try:
@@ -431,10 +435,19 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 think_txt = ""
             else:
                 think_txt, action, param = _parse_react(react_raw)
-                # Only hard constraint: can't call researcher if budget is gone
+                # Hard constraint 1: can't call researcher if budget is gone
                 if action == "CALL_RESEARCHER" and researcher_calls >= MAX_RESEARCHER_CALLS:
                     action = "CALL_ANALYST" if not analyst_called else "CALL_WRITER"
                     param  = "Researcher budget exhausted — proceeding with available data."
+                # Hard constraint 2: critic must run after every analyst before writer
+                if action == "CALL_WRITER" and analyst_called:
+                    last_analyst_rnd = max(
+                        (w["round"] for w in workspace if w["agent"] == "analyst"), default=0)
+                    last_critic_rnd = max(
+                        (w["round"] for w in workspace if w["agent"] == "critic"), default=0)
+                    if last_analyst_rnd > last_critic_rnd:
+                        action = "CALL_CRITIC"
+                        param  = "Review the latest analyst output before the final report is written."
 
             if think_txt:
                 await emit(react_supervisor, think_txt, "thinking", is_think=True)
@@ -560,23 +573,45 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 task_label = "initial"
 
             else:
-                # Follow-up search: one LLM call + bubble per sub-query (true parallel)
-                raw_queries = [q.strip() for q in param.split("||") if q.strip()]
-                queries     = raw_queries[:4] if raw_queries else [param]
+                # Follow-up search: researcher self-decomposes supervisor's directive
+                directive = param.strip() or topic
 
                 last_critic = next(
                     (w for w in reversed(workspace) if w["agent"] == "critic"), None)
-                critic_ctx  = ""
+                critic_ctx = ""
                 if last_critic and workspace and workspace[-1]["agent"] == "critic":
                     critic_ctx = f"\nCritic concern: {last_critic['output'][-400:]}\n"
 
-                n     = len(queries)
-                label = f"{n} parallel sub-searches" if n > 1 else "targeted search"
+                # Step 1: researcher decomposes directive into specific sub-queries
+                try:
+                    decompose_raw = await researcher.speak(
+                        f"Research topic: {topic}\n"
+                        f"Research directive: {directive}\n\n"
+                        f"List 6-8 specific web search queries to cover this directive comprehensively.\n"
+                        f"Include '2025' in queries where current data is needed.\n"
+                        f"Format: one search query per line, keywords only (max 12 words each), no bullets or numbers.",
+                        max_tokens=250, remember=False)
+                    queries = [
+                        ln.strip().lstrip("•-0123456789.) ")
+                        for ln in decompose_raw.split("\n")
+                        if ln.strip() and not ln.strip().startswith("#") and len(ln.strip()) > 5
+                    ][:8]
+                except AgentCallError:
+                    queries = []
+                if not queries:
+                    queries = [directive]
+
+                n = len(queries)
                 await emit(researcher,
-                    f"🔍 **Search #{researcher_calls} — {label}:**\n\n" +
+                    f"🔍 **Search #{researcher_calls} — {n} queries for: _{directive}_**\n\n" +
                     "\n".join(f"  • *{q}*" for q in queries), "research")
 
-                sr_list = await asyncio.gather(*[_search_with_retry(q) for q in queries])
+                # Step 2: run queries in batches of 4 (parallel within each batch)
+                all_sr_list: list[dict] = []
+                for i in range(0, len(queries), 4):
+                    batch = queries[i:i + 4]
+                    batch_results = await asyncio.gather(*[_search_with_retry(q) for q in batch])
+                    all_sr_list.extend(batch_results)
 
                 async def _summarize_query(sr: dict) -> str:
                     query   = sr["query"]
@@ -600,7 +635,8 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                             "Use TEMPLATE B (## 🔍 — <topic> / **Found** / **Not found** / "
                             "**Plausibility** / **Summary**). "
                             "Tag each finding [Data], [Estimate], or [Claim]. "
-                            "Cite source URLs. End with signal.",
+                            "Cite source URLs. Prefer 2025 sources; note year for all figures. "
+                            "End with signal.",
                             max_tokens=550, remember=False)
                     except AgentCallError as e:
                         await emit_error(f"Researcher failed on '{query}': {e}", researcher)
@@ -609,7 +645,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     return s
 
                 query_summaries = await asyncio.gather(
-                    *[_summarize_query(sr) for sr in sr_list])
+                    *[_summarize_query(sr) for sr in all_sr_list])
 
                 all_outputs, sig = [], ""
                 for s in query_summaries:
@@ -621,11 +657,11 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
 
                 output = "\n\n".join(all_outputs)
                 if not output.strip():
-                    output = (f"No data found for: {'; '.join(queries)}. "
+                    output = (f"No data found for directive: {directive}. "
                               "[RESEARCH: UNAVAILABLE | data: all queries returned empty]")
                     await emit(researcher,
-                        f"⚠️ No results for any query.\n\n"
-                        f"`[RESEARCH: UNAVAILABLE | data: {'; '.join(queries[:2])}...]`",
+                        f"⚠️ No results for any query in this dimension.\n\n"
+                        f"`[RESEARCH: UNAVAILABLE | data: {directive[:80]}]`",
                         "research")
 
         # ── ANALYST / CRITIC ──────────────────────────────────────────────────

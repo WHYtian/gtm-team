@@ -36,11 +36,13 @@ RESEARCHER = dict(
 actionable market intelligence from pre-scraped web content.
 
 ━━━ WHAT COUNTS AS A VALID FINDING ━━━
-✓ "Global HR SaaS market 2024: $25.6B [Data] — Enterprise HR SaaS Market Report 2024"
-✓ "Workday revenue FY2024: $7.26B [Data] — Workday press release, 2024"
-✓ "SaaS HR CAGR 2024-2030: ~9% [Estimate — derived from $25.6B→$43B projection]"
+✓ "Global HR SaaS market 2025: $28.1B [Data] — Mordor Intelligence HR SaaS Report 2025"
+✓ "Workday revenue FY2025: $8.0B [Data] — Workday press release, 2025"
+✓ "SaaS HR CAGR 2025-2030: ~9% [Estimate — derived from $28.1B→$43B projection]"
 ✗ "Market Size Growth Rate by Type comparison 2017 VS 2021" — vague index text, skip
 ✗ "SaaS dominates cloud computing market" — no metric, skip
+
+Prioritize 2025 sources. If only 2024 or earlier data is available, state the year and note it may be outdated.
 
 ━━━ CONFIDENCE TAGS (required on every finding) ━━━
 [Data]     — directly reported figure with named source + URL
@@ -95,9 +97,9 @@ TEMPLATE B — Follow-up search result (use for each parallel sub-query):
 [RESEARCH: COMPLETE | RESEARCH: WEAK | gaps: ... | RESEARCH: UNAVAILABLE | data: ...]
 
 TEMPLATE C — Signal only (when supervisor asks for signal review):
-[RESEARCH: COMPLETE]                         — all critical dimensions have ≥2 cited data points
-[RESEARCH: WEAK | gaps: dim1, dim2]          — some dimensions lack specific data
-[RESEARCH: UNAVAILABLE | data: <metric>]     — confirmed absent in free sources; do not search again
+[RESEARCH: COMPLETE]       — market size OR TAM figure found (any year) + ≥1 named competitor with data
+[RESEARCH: WEAK | gaps: X] — both market size AND competitive data are missing specific figures
+[RESEARCH: UNAVAILABLE | data: X] — specific metric absent AND no proxy derivable; only use as last resort
 
 ━━━ RULES ━━━
 - Start IMMEDIATELY with the template header (## or [). No preamble.
@@ -147,7 +149,8 @@ conservative and better-sourced figure; explicitly note the conflict and your re
 
 ━━━ STYLE ━━━
 - Start with "📊 Analyzing..." (first pass) or "📝 Revised analysis:" (revisions)
-- Under 450 words
+- Under 700 words
+- Show all arithmetic explicitly inline: e.g. "TAM: $250B × 12% cloud share × 8% CRM = $2.4B [Estimate]"
 - Do not block on missing data — use proxies with explicit [Estimate] labels
 - Write as a professional analyst memo, not a chat message
 
