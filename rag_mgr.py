@@ -82,6 +82,37 @@ def extract_pdf_text(pdf_bytes: bytes) -> str:
 
 # ── Ingestion ───────────────────────────────────────────────────────────────────
 
+def _text_quality_ratio(text: str) -> float:
+    """Return fraction of printable characters (0.0 = all binary, 1.0 = all text)."""
+    if not text:
+        return 0.0
+    printable = sum(1 for c in text if c.isprintable() or c in '\n\r\t')
+    return printable / len(text)
+
+
+# Chunks below this threshold are considered binary garbage
+MIN_TEXT_QUALITY = 0.85
+
+
+def _dedup_document(filename: str, namespace: str) -> int:
+    """Delete all chunks for a given filename+namespace combo. Returns count deleted."""
+    chroma = _get_chroma_client()
+    try:
+        col = chroma.get_collection("gtm_llamaindex")
+        res = col.get(
+            where={"$and": [{"filename": filename}, {"namespace": namespace}]},
+            include=["metadatas"],
+        )
+        ids = res.get("ids", [])
+        if ids:
+            col.delete(ids=ids)
+            global _index
+            _index = None
+        return len(ids)
+    except Exception:
+        return 0
+
+
 def ingest_document(
     filename: str,
     content: str,
@@ -102,6 +133,17 @@ def ingest_document(
 
     if namespace not in VALID_NAMESPACES:
         return {"error": f"invalid namespace: {namespace}"}
+
+    # Reject binary garbage before ingestion
+    quality = _text_quality_ratio(content)
+    if quality < MIN_TEXT_QUALITY:
+        return {
+            "error": f"content appears to be binary (text quality: {quality:.1%}, min: {MIN_TEXT_QUALITY:.0%})",
+            "filename": filename,
+        }
+
+    # Deduplicate: replace existing document with same filename + namespace
+    _dedup_document(filename, namespace)
 
     splitter = SentenceSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
 
