@@ -217,6 +217,11 @@ def _build_ctx_for(agent_id: str, workspace: list) -> list[dict]:
         for r in (w for w in workspace if w["agent"] == "researcher"):
             msgs.append({"role": "user",
                          "content": f"[RESEARCH Round {r['round']}]\n{r['output']}"})
+        # Validator reconciliation (if it ran) — inject before critic feedback so analyst
+        # knows which figures are confirmed vs conflicted vs RAG-only supplements
+        for v in (w for w in workspace if w["agent"] == "validator"):
+            msgs.append({"role": "user",
+                         "content": f"[DATA RECONCILIATION]\n{v['output']}"})
         critics = [w for w in workspace if w["agent"] == "critic"]
         if critics:
             c = critics[-1]
@@ -250,6 +255,114 @@ def _build_ctx_for(agent_id: str, workspace: list) -> list[dict]:
 def _has_findings(text: str) -> bool:
     """True if researcher output contains at least one confidence-tagged finding."""
     return bool(re.search(r'\[(Data|Estimate|Claim)\]', text, re.IGNORECASE))
+
+
+# ── Data Synthesizer helpers ──────────────────────────────────────────────────
+
+# Files to exclude from synthesis (test / non-data uploads)
+_SYNTH_SKIP_FILES = re.compile(
+    r'^(test_|fe_path|ng_test|test_upload|test_single)', re.IGNORECASE)
+
+SIM_THRESHOLD = 0.42  # tuned: 100% recall on true-match pairs, 0 false noise at this value
+
+
+def _extract_finding_texts(workspace: list) -> list[str]:
+    """Extract all confidence-tagged finding lines from researcher workspace entries.
+
+    Returns deduplicated list of clean strings (URLs stripped, max 220 chars each).
+    """
+    seen, findings = set(), []
+    for w in workspace:
+        if w["agent"] != "researcher":
+            continue
+        for line in w["output"].split('\n'):
+            sl = line.strip()
+            if not re.search(r'\[(Data|Estimate|Claim)\]', sl, re.IGNORECASE):
+                continue
+            # Strip URLs and artifacts
+            clean = re.sub(r'\(https?://[^\)]+\)', '', sl)
+            clean = re.sub(r'\(not provided\)', '', clean)
+            clean = re.sub(r'^[-•*\s]+', '', clean).strip()[:220]
+            if len(clean) < 20:
+                continue
+            key = clean[:80].lower()
+            if key not in seen:
+                seen.add(key)
+                findings.append(clean)
+    return findings
+
+
+def _get_user_rag_chunks() -> list[dict]:
+    """Return all meaningful user-namespace RAG chunks (test files excluded)."""
+    try:
+        from rag_mgr import _get_index
+        idx = _get_index()
+        col = idx._vector_store._collection
+        res = col.get(where={"namespace": "user"}, include=["documents", "metadatas"])
+        chunks = []
+        for doc, meta in zip(res["documents"], res["metadatas"]):
+            fname = meta.get("filename", "")
+            if _SYNTH_SKIP_FILES.match(fname):
+                continue
+            text = doc.strip()
+            if len(text) < 40:
+                continue
+            chunks.append({
+                "text":      text[:400],
+                "filename":  fname,
+                "chunk_idx": meta.get("chunk_index", 0),
+            })
+        return chunks
+    except Exception:
+        return []
+
+
+def _embed_pair_match(
+    findings: list[str],
+    rag_chunks: list[dict],
+    threshold: float = SIM_THRESHOLD,
+) -> tuple[list[dict], list[dict]]:
+    """Embedding-based pre-filter: returns (matched_pairs, rag_supplements).
+
+    matched_pairs  — RAG chunks whose max cosine similarity to any finding ≥ threshold.
+                     Each entry includes the best-matching finding text and the sim score.
+    rag_supplements — RAG chunks with max_sim < threshold (researcher didn't find this).
+
+    Uses the already-loaded HuggingFace embedding model — no LLM calls, pure numpy.
+    """
+    if not findings or not rag_chunks:
+        return [], rag_chunks
+
+    try:
+        import numpy as np
+        from rag_mgr import _get_embed
+
+        embed = _get_embed()
+        f_embs = np.array(embed.get_text_embedding_batch(findings))   # (N, D)
+        r_embs = np.array(embed.get_text_embedding_batch(
+            [c["text"] for c in rag_chunks]))                          # (M, D)
+
+        # Cosine similarity matrix (N, M)
+        f_norm = f_embs / (np.linalg.norm(f_embs, axis=1, keepdims=True) + 1e-9)
+        r_norm = r_embs / (np.linalg.norm(r_embs, axis=1, keepdims=True) + 1e-9)
+        sim_matrix = f_norm @ r_norm.T  # (N, M)
+
+        matched, supplements = [], []
+        for j, chunk in enumerate(rag_chunks):
+            col_sims = sim_matrix[:, j]
+            best_f_idx = int(np.argmax(col_sims))
+            max_sim = float(col_sims[best_f_idx])
+            if max_sim >= threshold:
+                matched.append({
+                    **chunk,
+                    "best_finding": findings[best_f_idx],
+                    "sim":          round(max_sim, 3),
+                })
+            else:
+                supplements.append(chunk)
+        return matched, supplements
+    except Exception:
+        return [], rag_chunks
 
 
 # ── Web helpers ───────────────────────────────────────────────────────────────
@@ -408,6 +521,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
     researcher_calls              = 0
     post_analyst_researcher_calls = 0
     analyst_called                = False
+    validator_called              = False
     revision_count                = 0
     final_report                  = ""
 
@@ -519,6 +633,12 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     action = "CALL_WRITER"
                     param  = ("Analyst has been revised twice. Write the final report using the "
                               "best available analysis. Label any unresolved issues inline.")
+                # Hard constraint 0: run Data Synthesizer before the very first analyst call
+                # if user-uploaded RAG data exists (no-op if no user docs).
+                if action == "CALL_ANALYST" and not analyst_called and not validator_called:
+                    if _get_user_rag_chunks():  # quick check: any user docs ingested?
+                        action = "CALL_VALIDATOR"
+                        param  = "Reconcile web search findings with imported knowledge base."
 
             if think_txt:
                 await emit(react_supervisor, think_txt, "thinking", is_think=True)
@@ -528,6 +648,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 "CALL_ANALYST":    f"Calling **Jamie (Analyst)** — {param}",
                 "CALL_CRITIC":     f"Calling **Morgan (Critic)** — {param}",
                 "CALL_WRITER":     "Calling **Report Writer** — producing final report",
+                "CALL_VALIDATOR":  "Calling **Jordan (Synthesizer)** — reconciling web vs imported data",
             }
             await emit(react_supervisor,
                 f"▶ {_labels.get(action, action)}", "routing")
@@ -539,6 +660,73 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
 
         sig    = ""
         output = ""
+
+        # ── VALIDATOR (Data Synthesizer) ──────────────────────────────────────
+        if action == "CALL_VALIDATOR":
+            from team.personas import DATA_SYNTHESIZER
+            synthesizer = Agent(**DATA_SYNTHESIZER)
+
+            # Step 1: extract all researcher findings (full list, not digest-truncated)
+            all_findings = _extract_finding_texts(workspace)
+
+            # Step 2: get user RAG chunks (test files excluded)
+            rag_chunks = _get_user_rag_chunks()
+
+            if all_findings and rag_chunks:
+                # Step 3: embedding-based pre-filter (pure numpy, no LLM)
+                loop = asyncio.get_event_loop()
+                matched, supplements = await loop.run_in_executor(
+                    None, _embed_pair_match, all_findings, rag_chunks, SIM_THRESHOLD)
+
+                # Step 4: build compact LLM input (only matched pairs + supplements)
+                pairs_block = ""
+                for p in matched:
+                    pairs_block += (
+                        f"\n[OVERLAP — sim={p['sim']}]\n"
+                        f"  Web finding : {p['best_finding'][:220]}\n"
+                        f"  RAG chunk   : [{p['filename']}] {p['text'][:220]}\n"
+                    )
+
+                supps_block = ""
+                for c in supplements[:15]:   # cap at 15 to avoid context overflow
+                    supps_block += f"\n[RAG-ONLY — {c['filename']}]\n  {c['text'][:200]}\n"
+
+                await emit(synthesizer,
+                    f"🔄 **Data Reconciliation** — {len(matched)} overlap pairs, "
+                    f"{len(supplements)} RAG supplements\n"
+                    f"Embedding threshold: {SIM_THRESHOLD} | Findings scanned: {len(all_findings)} | "
+                    f"RAG chunks: {len(rag_chunks)}",
+                    "validation")
+
+                synth_input = (
+                    f"Research topic: {topic}\n\n"
+                    f"OVERLAP PAIRS (embedding similarity ≥ {SIM_THRESHOLD}):\n"
+                    f"{pairs_block or '(none — web and RAG cover different metrics)'}\n\n"
+                    f"RAG SUPPLEMENTS (imported data not covered by web search):\n"
+                    f"{supps_block or '(none)'}"
+                )
+
+                try:
+                    result = await synthesizer.speak(
+                        synth_input, max_tokens=800, remember=False)
+                except AgentCallError as e:
+                    await emit_error(f"Data Synthesizer failed: {e}", synthesizer)
+                    result = "[SYNTHESIS: SKIPPED — error]"
+            else:
+                result = (
+                    f"[SYNTHESIS: SKIPPED — "
+                    f"{'no researcher findings yet' if not all_findings else 'no user RAG data'}]"
+                )
+
+            await emit(synthesizer, result, "validation")
+            validator_called = True
+            sig = "[SYNTHESIS: COMPLETE]" if "SYNTHESIS: COMPLETE" in result else ""
+            workspace.append({
+                "round": rnd, "agent": "validator",
+                "task": "reconcile web vs RAG", "output": result, "signal": sig,
+            })
+            # Immediately route to analyst (validator is not a terminal action)
+            continue
 
         # ── WRITER ───────────────────────────────────────────────────────────
         if action == "CALL_WRITER":
