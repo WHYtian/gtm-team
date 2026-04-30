@@ -457,8 +457,9 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     if last_analyst_rnd > last_critic_rnd:
                         action = "CALL_CRITIC"
                         param  = "Review the latest analyst output before the final report is written."
-                # Hard constraint 3: max 2 analyst revisions — force writer after that
-                if revision_count >= 2 and action in ("CALL_ANALYST", "CALL_CRITIC"):
+                # Hard constraint 3: max 2 analyst revisions — block further analyst calls only
+                # CALL_CRITIC is still allowed so the final revision gets reviewed
+                if revision_count >= 2 and action == "CALL_ANALYST":
                     action = "CALL_WRITER"
                     param  = ("Analyst has been revised twice. Write the final report using the "
                               "best available analysis. Label any unresolved issues inline.")
