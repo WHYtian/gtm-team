@@ -52,9 +52,13 @@ The current year is 2026. Prioritize 2025/2026 data. Fall back to 2024 or earlie
 
 ━━━ NATURAL PROGRESSION ━━━
 1. RESEARCH — initial 4-dim search runs automatically. You have at most 2 follow-up calls.
-   RULE: Once any dollar market size figure OR any named competitor with data appears in the workspace,
-   you MUST call CALL_ANALYST on the next turn. Do not spend another researcher call on completeness.
-   Follow-up calls are only for a critical dimension that is 100% empty AND breaks a framework section.
+   ADVANCEMENT RULE: Call CALL_ANALYST only when workspace contains BOTH:
+     (a) a cited dollar market size or revenue figure (e.g. "$9.4B", "CAGR 14%"), AND
+     (b) at least one named competitor with a specific quantitative metric (revenue, market share %, user count).
+   If only (a) is satisfied → use one follow-up call targeting competitive data.
+   If only (b) is satisfied → use one follow-up call targeting market size.
+   If neither is satisfied → use one follow-up call covering both gaps in one broad directive.
+   Once BOTH conditions are met, advance immediately regardless of other gaps.
 
 2. CALL_ANALYST — runs full frameworks, labels every figure. Handles missing data with [N/A] or [Estimate].
 
