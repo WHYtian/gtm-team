@@ -1,16 +1,25 @@
 """
-ReAct Supervisor orchestrator.
+ReAct Supervisor orchestrator — Phase State Machine Edition.
 
-Supervisor is the intelligent brain — at every step:
-  1. THINKS: reasons about current state, quality gaps, what's needed next
-  2. ACTS:   calls one of four tools (researcher / analyst / critic / writer)
+Architecture:
+  Explicit Phase enum replaces ad-hoc force conditions.
+  - Phase defines which actions are VALID at each step
+  - Supervisor LLM reasons and decides among valid actions
+  - State transitions are deterministic based on agent signals
+  - Hard caps per phase prevent deadlock; MAX_ROUNDS is the absolute backstop
 
-No hardcoded routing. Supervisor's LLM decides everything.
-Safeguard: after MAX_REVISION_CYCLES analyst revisions, force writer.
+Phases:
+  RESEARCH  → gather data (supervisor decides: more research or advance)
+  ANALYSIS  → analyst runs (forced; supervisor provides task)
+  CRITIQUE  → critic runs (forced)
+  REVISE    → post-critique (supervisor decides: revise or write)
+  VERIFY    → one targeted search after REJECT_DATA (forced)
+  WRITE     → writer runs (forced → DONE)
 """
 import asyncio
 import re
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
 from team.agent import Agent, AgentCallError
@@ -20,11 +29,12 @@ from team.skills import gather_dimension, web_search, web_scrape
 REPORTS_DIR = Path.home() / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 
-MAX_ROUNDS          = 30
-MAX_REVISION_CYCLES = 6  # analyst can be called this many extra times after first
-MAX_RESEARCHER_CALLS = 5  # hard cap — supervisor must proceed to analyst after this
+MAX_ROUNDS           = 40   # absolute backstop
+MAX_REVISION_CYCLES  = 3    # analyst revisions after first analysis
+MAX_RESEARCHER_CALLS = 7    # researcher call budget
+MAX_VERIFY           = 1    # max REJECT_DATA verification cycles
 
-_SUPV = "doubao-seed-2-0-pro-260215"   # upgraded model for deep orchestration reasoning
+_SUPV = "doubao-seed-2-0-pro-260215"
 
 RESEARCH_DIMS = [
     ("market_overview",       "market size growth revenue forecast"),
@@ -33,97 +43,163 @@ RESEARCH_DIMS = [
     ("regulatory_env",        "regulations compliance policy legal"),
 ]
 
-# ── Supervisor ReAct system prompt ────────────────────────────────────────────
+
+# ── Phase State Machine ────────────────────────────────────────────────────────
+
+class Phase(str, Enum):
+    RESEARCH  = "research"
+    ANALYSIS  = "analysis"
+    CRITIQUE  = "critique"
+    REVISE    = "revise"
+    VERIFY    = "verify"
+    WRITE     = "write"
+
+
+def _valid_actions(phase: Phase, researcher_calls: int,
+                   revision_count: int, verify_count: int) -> list[str]:
+    """Return list of valid ACT keywords for the current phase."""
+    if phase == Phase.RESEARCH:
+        acts = ["CALL_ANALYST"]
+        if researcher_calls < MAX_RESEARCHER_CALLS:
+            acts.insert(0, "CALL_RESEARCHER")
+        return acts
+    elif phase == Phase.REVISE:
+        acts = ["CALL_WRITER"]
+        if revision_count < MAX_REVISION_CYCLES:
+            acts.insert(0, "CALL_ANALYST")
+        return acts
+    elif phase == Phase.ANALYSIS:
+        return ["CALL_ANALYST"]
+    elif phase == Phase.CRITIQUE:
+        return ["CALL_CRITIC"]
+    elif phase == Phase.VERIFY:
+        return ["CALL_RESEARCHER"]
+    elif phase == Phase.WRITE:
+        return ["CALL_WRITER"]
+    return ["CALL_WRITER"]
+
+
+def _next_phase(phase: Phase, action: str, signal: str,
+                revision_count: int, verify_count: int) -> Phase:
+    """Deterministic state transition after an action completes."""
+    sig_up = signal.upper()
+    if action == "CALL_RESEARCHER":
+        return Phase.ANALYSIS if phase == Phase.VERIFY else Phase.RESEARCH
+    elif action == "CALL_ANALYST":
+        return Phase.CRITIQUE
+    elif action == "CALL_CRITIC":
+        if "APPROVED" in sig_up:
+            return Phase.WRITE
+        elif "REJECT_DATA" in sig_up and verify_count < MAX_VERIFY:
+            return Phase.VERIFY
+        else:
+            return Phase.REVISE if revision_count < MAX_REVISION_CYCLES else Phase.WRITE
+    elif action == "CALL_WRITER":
+        return Phase.WRITE
+    return phase
+
+
+def _extract_verify_query(workspace: list) -> str:
+    """Pull the critic's suggested search query from REJECT_DATA verdict."""
+    for w in reversed(workspace):
+        if w["agent"] == "critic":
+            m = re.search(
+                r'\[VERDICT:\s*REJECT_DATA[^|]*\|\s*claim:[^|]*\|\s*search:\s*([^\]]+)\]',
+                w["output"], re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+    return "verify disputed market data figure"
+
+
+def _default_task(action: str, workspace: list, phase: Phase) -> str:
+    """Generate a deterministic task description when supervisor is not consulted."""
+    if action == "CALL_ANALYST":
+        critics = [w for w in workspace if w["agent"] == "critic"]
+        if critics and phase in (Phase.REVISE, Phase.ANALYSIS):
+            fb = critics[-1]["output"][:400]
+            return (f"Revise your analysis to address the critic's feedback. "
+                    f"Label all figures [Data]/[Estimate]/[Assumption].\n\nCritic: {fb}")
+        return ("Analyse all collected research using TAM/SAM/SOM, PESTEL, and Porter's Five Forces. "
+                "Label every figure [Data], [Estimate], or [Assumption]. "
+                "Present bull and bear perspectives for key conclusions.")
+    elif action == "CALL_CRITIC":
+        return ("Critique the analyst's analysis: unsupported claims, logical gaps, "
+                "suspicious market size figures (check order-of-magnitude), missing evidence.")
+    elif action == "CALL_WRITER":
+        return "Write the complete GTM Intelligence Report including a Competitive Battle Cards section."
+    return ""
+
+
+def _describe_action(action: str, param: str) -> str:
+    labels = {
+        "CALL_RESEARCHER": f"Calling **Alex (Researcher)** — {param[:160]}",
+        "CALL_ANALYST":    f"Calling **Jamie (Analyst)** — {param[:160]}",
+        "CALL_CRITIC":     f"Calling **Morgan (Critic)** — {param[:160]}",
+        "CALL_WRITER":     "Calling **Report Writer** — producing final report",
+    }
+    return labels.get(action, action)
+
+
+# ── Supervisor prompts ─────────────────────────────────────────────────────────
 
 REACT_SYSTEM = """\
 You are the GTM Intelligence Supervisor. Orchestrate a research team to produce a \
 high-quality, data-rich GTM Intelligence Report.
 
-TEAM TOOLS:
+TEAM:
   CALL_RESEARCHER — Alex: parallel web searches for market data, statistics, companies
-  CALL_ANALYST    — Jamie: applies TAM/SAM/SOM, PESTEL, Porter's Five Forces
-  CALL_CRITIC     — Morgan: rigorously challenges claims, identifies unsupported data
-  CALL_WRITER     — Report Writer: produces the final structured GTM Intelligence Report
+  CALL_ANALYST    — Jamie: TAM/SAM/SOM, PESTEL, Porter's Five Forces, [Data]/[Estimate]/[Assumption] labels
+  CALL_CRITIC     — Morgan: challenges claims, checks data quality and order-of-magnitude
+  CALL_WRITER     — Report Writer: final structured GTM Intelligence Report with Battle Cards
 
-AT EACH STEP output in this exact format:
-THINK: [2-4 sentences — what's done, specific gaps, why this action]
+The current phase and valid actions are shown in each prompt — only output valid actions.
+
+━━━ THINK STEP (required, structured) ━━━
+Structure your THINK as:
+  HAVE: What confirmed data do we have? (cite key figures and their sources)
+  GAPS: What critical data is still missing for a complete GTM report?
+  FEASIBLE: Can those gaps be filled with more research, or should we accept estimates?
+  DECISION: Which action best moves toward a high-quality report right now?
+
+━━━ ACT FORMAT ━━━
 ACT: CALL_RESEARCHER | queries: q1 || q2 || q3
-  OR CALL_ANALYST    | task: [what to analyze, which frameworks]
-  OR CALL_CRITIC     | task: [what to critique]
-  OR CALL_WRITER     | task: [write final report]
-  OR DONE            | reason: [only if report already written]
+ACT: CALL_ANALYST    | task: [frameworks to apply + specific gaps to address]
+ACT: CALL_CRITIC     | task: [what to focus on]
+ACT: CALL_WRITER     | task: write final report
 
-RESEARCHER CALL RULES:
-- First call ever: ACT: CALL_RESEARCHER | query: initial
-- Follow-up calls: DECOMPOSE gaps into 2-4 parallel sub-queries using the || separator.
-  ACT: CALL_RESEARCHER | queries: sub-query-1 || sub-query-2 || sub-query-3
+━━━ RESEARCHER QUERY RULES ━━━
+- Keywords only: metric + geography + year — max 12 words per sub-query
+- Separate parallel sub-queries with || (each fires as a separate search + bubble)
+- Avoid paywalled sources: Statista, Gartner PDF, IDC, McKinsey, Forrester
+- Target: Wikipedia, press releases, Reuters/Bloomberg news, government/NGO sites, vendor pages
+- PIVOT RULE: if a metric failed 2+ prior searches → do NOT retry, search a DIFFERENT gap instead
 
-⚠️ PARALLEL QUERY FORMAT — STRICTLY REQUIRED:
-  CORRECT:   queries: SaaS CRM market size 2024 Gartner || top 5 CRM vendors market share || CRM CAGR 2024-2030
-  WRONG:     queries: SaaS CRM market size 2024, top 5 vendors, CAGR forecast
-  WRONG:     queries: What is the market size of SaaS CRM including top vendors and growth rate?
-  Using commas or natural language means only ONE search fires — you waste the entire call.
+━━━ DATA CONFLICT RULE ━━━
+If two rounds return figures for the same metric differing by 10×+ (e.g. $5M vs $5B):
+flag it in THINK, instruct analyst to use the conservative figure and label the conflict explicitly.
 
-QUERY WRITING RULES (every sub-query):
-- Keywords only — metric + geography + year + company/source names — max 12 words
-  ✓ "solid state battery market size 2024 2030 forecast"
-  ✓ "Toyota Samsung solid state battery pilot production 2024"
-  ✓ "solid electrolyte battery cost per kWh 2024"
-  ✗ "What is the size of the solid-state battery market?" (question format — bad)
-  ✗ "BloombergNEF solid state battery report 2024" (paywalled — won't work)
-- For verification: [disputed claim] site:news/company/wiki
-  ✓ "Toyota solid state battery 2027 launch EV production"
+━━━ QUALITY BAR before CALL_WRITER ━━━
+- Market size estimate (even proxied/labelled), growth rate, ≥3 named competitors
+- At least one framework fully applied with evidence
+- Critic has reviewed at least once
 
-SEARCH SOURCE RULES — CRITICAL:
-- Target ONLY freely accessible sources: Wikipedia, company press releases, news articles (Reuters, Bloomberg news — NOT Bloomberg terminal), government sites, NGO reports, industry association publications, vendor websites.
-- Do NOT name paywalled databases in queries: Bloomberg Intelligence, Statista, S&P Global, Gartner, Forrester, McKinsey, IDC, Wood Mackenzie, IHS Markit — these will return zero results.
-- If you need a market figure, search "[topic] market size [year] report" or "[topic] [metric] forecast [year] industry".
-
-RESEARCHER BUDGET: Maximum 5 researcher calls total.
-- After 5 calls, STOP and move to CALL_ANALYST — accept best available data.
-- Never search the same data point more than twice with different source names.
-  Check "Previously searched queries" in the prompt before each call.
-
-DATA UNAVAILABILITY RULE:
-- If a data point appears in "Previously searched queries" 2+ times with no result, it does NOT exist in free sources.
-- When researcher returns [RESEARCH: UNAVAILABLE], accept a proxy/estimate — do NOT search again.
-- Accept imperfect data; an analysis with clearly-labelled estimates beats an empty report.
-- PIVOT RULE: once a metric fails 2 searches, do NOT rephrase and retry — spend remaining researcher calls on DIFFERENT dimensions (competitors, use-cases, pricing, geography). A report with 3 solid data pillars beats one that spent all 5 calls chasing 1 missing number.
-- DATA CONFLICT ALERT: if two researcher rounds return figures for the same metric that differ by 10× or more (e.g. $5M vs $5B, or $30B vs $462B), flag this in your THINK step and instruct the analyst to use the more conservative, better-sourced figure and label the conflict explicitly.
-
-POST-ANALYST RULE (important):
-- Once CALL_ANALYST has been called, do NOT call CALL_RESEARCHER for general data gaps.
-- The only exception: Critic issues [VERDICT: REJECT_DATA] for a SPECIFIC figure.
-  In that case use the critic's "search:" query exactly — one targeted CALL_RESEARCHER only.
-- After that single verification call, return to CALL_ANALYST or CALL_WRITER.
-
-CRITIC FEEDBACK RULES:
-- [VERDICT: APPROVED] → proceed to CALL_WRITER
-- [VERDICT: NEEDS_REVISION] → CALL_ANALYST with specific revision instructions
-- [VERDICT: REJECT_DATA] → one targeted CALL_RESEARCHER using the critic's search query, then CALL_ANALYST
-- Do NOT call CALL_RESEARCHER after NEEDS_REVISION — that means logic, not missing data.
-
-QUALITY STANDARDS before CALL_WRITER:
-- Research: market sizes, CAGR %, named companies with data, source URLs (estimates labelled)
-- Analysis: frameworks applied with evidence, clear strategic conclusions
-- Critic's major concerns addressed or revision limit reached
-
-THINK: 2-4 sentences. Respond in the same language as the topic.\
+THINK: structured as HAVE / GAPS / FEASIBLE / DECISION (3-5 sentences total).
+Respond in the same language as the topic.\
 """
 
 REACT_PROMPT = """\
 Research topic: {topic}
 Round: {rnd}/{max_rounds}
-Analyst called: {analyst_called} | Analyst revisions: {revision_count} (max: {max_revision_cycles})
-Researcher calls: {research_count}/{max_researcher_calls}{researcher_budget_warning}
+Phase: **{phase}** | Valid actions this phase: {valid_actions}{budget_warn}
+Analyst revisions used: {revision_count}/{max_revision_cycles} | Researcher calls: {research_count}/{max_researcher_calls}
 
-Previously searched queries (do NOT repeat these):
+Previously searched (do NOT repeat these):
 {searched_queries}
 
 WORKSPACE (oldest → newest):
 {workspace}
 
-Your assessment and next action:\
+Your structured assessment and next action (THINK then ACT, only use valid actions):\
 """
 
 
@@ -141,16 +217,17 @@ def _parse_react(text: str) -> tuple[str, str, str]:
         text, re.DOTALL | re.IGNORECASE)
 
     if not act_m:
-        # Fallback: infer from keywords
         for kw in ("CALL_RESEARCHER", "CALL_ANALYST", "CALL_CRITIC", "CALL_WRITER", "DONE"):
             if kw.lower().replace("_", " ") in text.lower():
                 return think, kw, ""
-        return think, "CALL_ANALYST", "Continue with the analysis using research data."
+        return think, "CALL_ANALYST", "Continue analysis with available research data."
 
     action = act_m.group(1).upper()
     param  = (act_m.group(2) or "").strip()[:800]
     return think, action, param
 
+
+# ── Workspace helpers ─────────────────────────────────────────────────────────
 
 def _workspace_text(workspace: list) -> str:
     if not workspace:
@@ -159,7 +236,6 @@ def _workspace_text(workspace: list) -> str:
     parts = []
     for i, w in enumerate(workspace):
         if i >= n - 3:
-            # Show more of recent entries; critic verdict must not be cut off
             limit = 1000 if w["agent"] == "critic" else 700
         else:
             limit = 180
@@ -175,25 +251,21 @@ def _workspace_text(workspace: list) -> str:
 def _build_ctx_for(agent_id: str, workspace: list) -> list[dict]:
     """
     Build curated extra_context for analyst / critic.
-    Deliberately excludes each agent's own previous outputs to prevent repetition.
+    Analyst sees ALL researcher rounds (early baseline + latest gap-fill).
+    Critic sees full analyst output + all researcher rounds for cross-checking.
     """
     if agent_id == "analyst":
         msgs = []
-        # ALL researcher rounds — first round has 4-dim baseline, later rounds fill gaps
-        # Older rounds get shorter budget; most recent gets full 2000 chars
         researchers = [w for w in workspace if w["agent"] == "researcher"]
-        if researchers:
-            for i, r in enumerate(researchers):
-                limit = 2000 if i == len(researchers) - 1 else 600
-                msgs.append({"role": "user",
-                             "content": f"[RESEARCH Round {r['round']}]\n{r['output'][:limit]}"})
-        # Critic's most recent verdict — full output so analyst knows exactly what to fix
+        for i, r in enumerate(researchers):
+            limit = 2000 if i == len(researchers) - 1 else 600
+            msgs.append({"role": "user",
+                         "content": f"[RESEARCH Round {r['round']}]\n{r['output'][:limit]}"})
         critics = [w for w in workspace if w["agent"] == "critic"]
         if critics:
             c = critics[-1]
             msgs.append({"role": "user",
                          "content": f"[CRITIC FEEDBACK — Round {c['round']}]\n{c['output'][:1200]}"})
-        # Analyst's own last analysis — so it knows what to revise (but NOT as assistant role)
         analysts = [w for w in workspace if w["agent"] == "analyst"]
         if analysts:
             a = analysts[-1]
@@ -203,23 +275,18 @@ def _build_ctx_for(agent_id: str, workspace: list) -> list[dict]:
 
     elif agent_id == "critic":
         msgs = []
-        # Analyst's current analysis — full output (this is what critic evaluates)
         analysts = [w for w in workspace if w["agent"] == "analyst"]
         if analysts:
             a = analysts[-1]
             msgs.append({"role": "user",
-                         "content": f"[ANALYST'S CURRENT ANALYSIS — Round {a['round']}]\n{a['output'][:2500]}"})
-        # All researcher rounds so critic can cross-check contradictory figures
+                         "content": f"[ANALYST'S ANALYSIS — Round {a['round']}]\n{a['output'][:2500]}"})
         researchers = [w for w in workspace if w["agent"] == "researcher"]
-        if researchers:
-            for i, r in enumerate(researchers):
-                limit = 800 if i == len(researchers) - 1 else 300
-                msgs.append({"role": "user",
-                             "content": f"[RESEARCH Round {r['round']}]\n{r['output'][:limit]}"})
-        # NOTE: deliberately NOT including critic's own previous verdicts → prevents repetition
+        for i, r in enumerate(researchers):
+            limit = 800 if i == len(researchers) - 1 else 300
+            msgs.append({"role": "user",
+                         "content": f"[RESEARCH Round {r['round']}]\n{r['output'][:limit]}"})
         return msgs
 
-    # Fallback
     return [{"role": "user",
              "content": f"[{w['agent'].upper()} — Round {w['round']}]\n{w['output'][:600]}"}
             for w in workspace[-5:]]
@@ -236,7 +303,6 @@ def _get_rag(topic: str) -> str:
 
 
 async def _search_with_sources(query: str) -> dict:
-    """Search and return {text, sources, query}. Sources carry URL + title + snippet."""
     results = await web_search(query, max_results=4)
     if not results:
         return {"text": "", "sources": [], "query": query}
@@ -259,10 +325,6 @@ async def _search_with_sources(query: str) -> dict:
 
 
 async def _search_with_retry(query: str) -> dict:
-    """
-    Try query; if < 200 chars back, reformulate once (strip stop words, shorten).
-    On second failure mark as limited so researcher can flag it in the report.
-    """
     result = await _search_with_sources(query)
     if len(result.get("text", "")) >= 200:
         return result
@@ -287,7 +349,6 @@ async def _search_with_retry(query: str) -> dict:
 
 
 def _fmt_sources(sources: list) -> str:
-    """Format source list for researcher prompt."""
     seen, lines = set(), []
     for s in sources:
         url = s.get("url", "")
@@ -346,7 +407,6 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
         await q.put(msg)
 
     async def emit_error(message: str, agent=None):
-        """Send an error bubble into the team chat area."""
         agent = agent or react_supervisor
         err_msg = {
             "type": "team_chat",
@@ -383,12 +443,14 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
             cache_hit["report"], cache_hit["entry_id"], cache_hit["age_days"])
 
     # ── State ─────────────────────────────────────────────────────────────────
-    workspace:       list[dict] = []
-    rag_context      = ""
-    researcher_calls = 0
-    revision_count   = 0
-    analyst_called   = False
-    final_report     = ""
+    workspace:        list[dict] = []
+    rag_context       = ""
+    researcher_calls  = 0
+    revision_count    = 0
+    verify_count      = 0
+    first_analysis    = True   # True until analyst has run once
+    final_report      = ""
+    phase             = Phase.RESEARCH
 
     await emit(react_supervisor,
         f"🚀 **Starting: {topic}**\n\n"
@@ -398,51 +460,36 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
     # ── ReAct loop ────────────────────────────────────────────────────────────
     for rnd in range(1, MAX_ROUNDS + 1):
 
-        writer_done = any(w["agent"] == "writer" for w in workspace)
+        if any(w["agent"] == "writer" for w in workspace):
+            break
 
-        # Force analyst when researcher budget exhausted but analyst hasn't run yet
-        force_analyst = (
-            researcher_calls >= MAX_RESEARCHER_CALLS
-            and not analyst_called
-            and not writer_done
-        )
+        valid = _valid_actions(phase, researcher_calls, revision_count, verify_count)
 
-        # Force writer when revision cap hit or near round limit.
-        # Researcher budget saturation alone does NOT force write — critic must run at least once first.
-        critic_called = any(w["agent"] == "critic" for w in workspace)
-        force_write = (
-            not writer_done and analyst_called and (
-                revision_count >= MAX_REVISION_CYCLES or
-                rnd >= MAX_ROUNDS - 2 or
-                (researcher_calls >= MAX_RESEARCHER_CALLS and critic_called)
-            )
-        )
+        # ── Determine action ──────────────────────────────────────────────────
 
-        if force_analyst:
+        if phase == Phase.VERIFY:
+            # Forced: targeted researcher call using critic's REJECT_DATA search query
+            action    = "CALL_RESEARCHER"
+            param     = _extract_verify_query(workspace)
             think_txt = ""
-            action    = "CALL_ANALYST"
-            param     = ("Researcher call budget exhausted. Analyse all collected research data "
-                         "using TAM/SAM/SOM, PESTEL, and Porter's Five Forces.")
             await emit(react_supervisor,
-                f"⏰ **Round {rnd}:** Researcher budget ({MAX_RESEARCHER_CALLS} calls) exhausted — "
-                "routing to analyst.", "routing")
-        elif force_write:
+                f"🔬 **Round {rnd}:** Verifying disputed claim — {param[:120]}", "routing")
+
+        elif len(valid) == 1:
+            # Forced: only one valid action (ANALYSIS / CRITIQUE / WRITE)
+            action    = valid[0]
+            param     = _default_task(action, workspace, phase)
             think_txt = ""
-            action    = "CALL_WRITER"
-            param     = ("Write the final GTM Intelligence Report using all collected research "
-                         "and analysis. The analyst has revised sufficiently.")
-            reason = (f"Analyst revised {revision_count} times" if revision_count >= MAX_REVISION_CYCLES
-                      else f"researcher budget saturated" if researcher_calls >= MAX_RESEARCHER_CALLS
-                      else f"approaching round limit ({rnd}/{MAX_ROUNDS})")
             await emit(react_supervisor,
-                f"⏰ **Round {rnd}:** {reason} — proceeding to final report.", "routing")
+                f"▶ **Round {rnd}:** {_describe_action(action, param)}", "routing")
+
         else:
-            # Budget warning when running low and analyst not yet called
+            # Dynamic routing: supervisor decides among valid options
+            # (RESEARCH with budget remaining, or REVISE phase)
             budget_remaining = MAX_RESEARCHER_CALLS - researcher_calls
-            budget_warn = (f" — ⚠️ ONLY {budget_remaining} CALL(S) LEFT, move to analyst soon"
-                           if budget_remaining <= 1 and not analyst_called else "")
+            budget_warn = (f" | ⚠️ {budget_remaining} researcher call(s) left"
+                           if budget_remaining <= 2 else "")
 
-            # Build list of already-searched queries so supervisor avoids repeating them
             searched_parts = []
             for w in workspace:
                 if w["agent"] == "researcher" and w.get("task") and w["task"] != "initial":
@@ -450,65 +497,60 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         sq = sq.strip()
                         if sq:
                             searched_parts.append(f"  • {sq[:120]}")
-            searched_block = "\n".join(searched_parts) if searched_parts else "  (none yet — first follow-up)"
+            searched_block = "\n".join(searched_parts) or "  (none yet — first follow-up)"
 
-            # Ask Supervisor: THINK + ACT
             try:
                 react_raw = await react_supervisor.speak(
                     REACT_PROMPT.format(
                         topic=topic,
                         rnd=rnd,
                         max_rounds=MAX_ROUNDS,
-                        analyst_called="Yes" if analyst_called else "No",
+                        phase=phase.value,
+                        valid_actions=" | ".join(valid),
+                        budget_warn=budget_warn,
                         revision_count=revision_count,
                         max_revision_cycles=MAX_REVISION_CYCLES,
                         research_count=researcher_calls,
                         max_researcher_calls=MAX_RESEARCHER_CALLS,
-                        researcher_budget_warning=budget_warn,
                         searched_queries=searched_block,
                         workspace=_workspace_text(workspace),
                     ),
-                    max_tokens=500, remember=False)
+                    max_tokens=600, remember=False)
             except AgentCallError as e:
                 await emit_error(f"Supervisor failed: {e}")
-                # Fallback routing based on current state
-                if not analyst_called and workspace:
-                    react_raw = "THINK: Supervisor error — falling back.\nACT: CALL_ANALYST | task: Analyse all available research data."
-                elif analyst_called and not any(w["agent"] == "writer" for w in workspace):
-                    react_raw = "THINK: Supervisor error — proceeding to report.\nACT: CALL_WRITER | task: Write the final report with available data."
-                else:
-                    await emit_error("Supervisor unrecoverable — stopping research.")
-                    break
+                action    = valid[0]
+                param     = _default_task(action, workspace, phase)
+                think_txt = ""
+            else:
+                think_txt, action, param = _parse_react(react_raw)
+                # Enforce valid actions — never let supervisor escape the phase constraints
+                if action not in valid:
+                    action = valid[0]
+                    param  = _default_task(action, workspace, phase)
 
-            think_txt, action, param = _parse_react(react_raw)
-
-            # Emit THINK (supervisor reasoning — styled differently in frontend)
             if think_txt:
-                await emit(react_supervisor,
-                    think_txt, "thinking", is_think=True)
-
-        # Emit ACT decision (first researcher call always does initial 4-dim search)
-        researcher_display = (
-            "Calling **Alex (Researcher)** — Initial broad research across 4 dimensions"
-            if action == "CALL_RESEARCHER" and researcher_calls == 0
-            else f"Calling **Alex (Researcher)** — {param[:180]}"
-        )
-        action_desc = {
-            "CALL_RESEARCHER": researcher_display,
-            "CALL_ANALYST":    f"Calling **Jamie (Analyst)** — {param[:180]}",
-            "CALL_CRITIC":     f"Calling **Morgan (Critic)** — {param[:180]}",
-            "CALL_WRITER":     "Calling **Report Writer** — producing final report",
-            "DONE":            f"Research complete — {param[:180]}",
-        }
-        await emit(react_supervisor,
-            f"▶ {action_desc.get(action, action)}", "routing")
+                await emit(react_supervisor, think_txt, "thinking", is_think=True)
+            await emit(react_supervisor,
+                f"▶ {_describe_action(action, param)}", "routing")
 
         if action == "DONE":
             break
 
+        # ── Execute action ────────────────────────────────────────────────────
+
+        sig    = ""
+        output = ""
+
+        # ── WRITER ───────────────────────────────────────────────────────────
         if action == "CALL_WRITER":
-            # Give writer: analyst full output + critic full output + researcher summaries
             _writer_ctx = []
+            _rs = [w for w in workspace if w["agent"] == "researcher"]
+            if _rs:
+                _writer_ctx.append({"role": "user",
+                                    "content": f"[RESEARCH BASELINE]\n{_rs[0]['output'][:800]}"})
+            if len(_rs) > 1:
+                _writer_ctx.append({"role": "user",
+                                    "content": f"[RESEARCH LATEST]\n{_rs[-1]['output'][:600]}"})
             for w in workspace:
                 if w["agent"] == "analyst":
                     _writer_ctx.append({"role": "user",
@@ -516,20 +558,12 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 elif w["agent"] == "critic":
                     _writer_ctx.append({"role": "user",
                                         "content": f"[CRITIC]\n{w['output'][:800]}"})
-            # Add first researcher round (baseline) and last researcher round (gap-fill)
-            _rs = [w for w in workspace if w["agent"] == "researcher"]
-            if _rs:
-                _writer_ctx.insert(0, {"role": "user",
-                                       "content": f"[RESEARCH BASELINE]\n{_rs[0]['output'][:800]}"})
-            if len(_rs) > 1:
-                _writer_ctx.insert(1, {"role": "user",
-                                       "content": f"[RESEARCH LATEST]\n{_rs[-1]['output'][:600]}"})
-            ctx = _writer_ctx
+
             rag_note = f"\n\nKNOWLEDGE BASE:\n{rag_context[:800]}" if rag_context else ""
             try:
                 result = await writer.speak(
                     f"Supervisor instruction: {param}{rag_note}",
-                    extra_context=ctx, max_tokens=3000)
+                    extra_context=_writer_ctx, max_tokens=3000)
             except AgentCallError as e:
                 await emit_error(f"Report Writer failed: {e}", writer)
                 result = ""
@@ -543,30 +577,15 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 await emit(react_supervisor,
                     "✅ Report written. Research pipeline complete.", "complete")
                 break
-            # Writer failed — try once more next round via emergency fallback
-            await emit_error("Writer call failed — will retry after loop.", react_supervisor)
+            await emit_error("Writer call failed — will retry.", react_supervisor)
+            continue
 
-        # Map action → agent_id
-        agent_id = {
-            "CALL_RESEARCHER": "researcher",
-            "CALL_ANALYST":    "analyst",
-            "CALL_CRITIC":     "critic",
-        }.get(action)
-
-        if not agent_id:
-            await emit(react_supervisor, f"⚠️ Unknown action `{action}`. Stopping.", "routing")
-            break
-
-        phase = phase_map[agent_id]
-        agent = agents_map[agent_id]
-
-        # ── Execute agent ─────────────────────────────────────────────────────
-
-        if agent_id == "researcher":
+        # ── RESEARCHER ────────────────────────────────────────────────────────
+        elif action == "CALL_RESEARCHER":
             researcher_calls += 1
 
             if researcher_calls == 1:
-                # Initial parallel search across all 4 dimensions
+                # Initial parallel search across 4 dimensions
                 await emit(researcher,
                     f"🔍 **Initial research: *{topic}***\n"
                     "Launching parallel searches across 4 dimensions...", "research")
@@ -579,14 +598,13 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 rag_context = rag_ctx
                 summaries: dict[str, str] = {}
 
-                # Parallelize all 4 dimension LLM summarization calls
                 async def _summarize_dim(dr: dict) -> tuple[str, str]:
                     dim, raw = dr["dimension"], dr["text"]
                     try:
                         s = await researcher.speak(
                             f'Summarise web data about "{topic}" — {dim.replace("_", " ")}.\n\n'
                             f'{raw[:3000]}\n\n'
-                            "Use TEMPLATE A (table + summary + confidence). "
+                            "Use TEMPLATE A (Key Findings + Synthesis + Gaps + Confidence). "
                             "Start immediately with ## — no preamble.",
                             max_tokens=550, remember=False)
                     except AgentCallError as e:
@@ -618,21 +636,19 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 except AgentCallError as e:
                     sig_raw = "[RESEARCH: WEAK | gaps: signal check failed]"
                     await emit_error(f"Researcher signal check failed: {e}", researcher)
-                # Extract clean signal line even if reasoning model adds extra text
                 sig_match = re.search(r'\[RESEARCH[^\]]*\]', sig_raw, re.IGNORECASE)
                 sig = sig_match.group(0) if sig_match else "[RESEARCH: WEAK | gaps: signal unclear]"
                 output += f"\n\n{sig}"
                 await emit(researcher,
                     f"📊 Initial research complete. Signal: `{sig}`", "research")
 
+                task_label = "initial"
+
             else:
-                # Parse multi-query param: "q1 || q2 || q3" or single query
-                # is_verify branch removed — unified gap-fill handles both cases;
-                # multi-query must work even when previous step was critic (REJECT_DATA flow)
+                # Follow-up search: one LLM call + bubble per sub-query (true parallel)
                 raw_queries = [q.strip() for q in param.split("||") if q.strip()]
                 queries     = raw_queries[:4] if raw_queries else [param]
 
-                # If previous workspace step was a critic REJECT_DATA, attach critic context
                 last_critic = next(
                     (w for w in reversed(workspace) if w["agent"] == "critic"), None)
                 critic_ctx  = ""
@@ -645,10 +661,8 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     f"🔍 **Search #{researcher_calls} — {label}:**\n\n" +
                     "\n".join(f"  • *{q}*" for q in queries), "research")
 
-                # Web searches run in parallel
                 sr_list = await asyncio.gather(*[_search_with_retry(q) for q in queries])
 
-                # Per-query LLM summarization — each sub-search gets its own call and bubble
                 async def _summarize_query(sr: dict) -> str:
                     query   = sr["query"]
                     text    = sr.get("text", "")
@@ -659,21 +673,23 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     if not text:
                         notes = "\n\n❌ Zero results."
                     if not text and not sr.get("sources"):
-                        return (f"## 🔍 — {query}\n\n### Findings\n- ⚠️ No public data\n\n"
-                                f"### Summary\nNo results found.\n\n"
+                        return (f"## 🔍 — {query}\n\n**Found:** Nothing\n\n"
+                                f"**Not found:** {query}\n\n**Plausibility:** N/A\n\n"
+                                f"**Summary:** No results found.\n\n"
                                 f"[RESEARCH: UNAVAILABLE | data: {query}]")
                     try:
                         s = await researcher.speak(
                             f"Research task: {query}{critic_ctx}\n\n"
                             f"Sources:\n{sources}\n\n"
                             f"Content:\n{text[:1800]}{notes}\n\n"
-                            "Use TEMPLATE B (## 🔍 — <topic> / ### Findings / ### Summary). "
-                            "Cite source URLs. Mark uncertain data ⚠️. "
-                            "End with signal: [RESEARCH: COMPLETE] / [RESEARCH: WEAK | gaps: ...] / [RESEARCH: UNAVAILABLE | data: ...]",
+                            "Use TEMPLATE B (## 🔍 — <topic> / **Found** / **Not found** / "
+                            "**Plausibility** / **Summary**). "
+                            "Tag each finding [Data], [Estimate], or [Claim]. "
+                            "Cite source URLs. End with signal.",
                             max_tokens=550, remember=False)
                     except AgentCallError as e:
                         await emit_error(f"Researcher failed on '{query}': {e}", researcher)
-                        s = (f"## 🔍 — {query}\n\n### Findings\n- ⚠️ Error: {e}\n\n"
+                        s = (f"## 🔍 — {query}\n\n**Found:** Error\n\n"
                              f"[RESEARCH: WEAK | gaps: summarisation error]")
                     return s
 
@@ -686,7 +702,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     all_outputs.append(s)
                     sm = re.search(r'\[RESEARCH[^\]]*\]', s, re.IGNORECASE)
                     if sm:
-                        sig = sm.group(0)   # last signal wins; UNAVAILABLE > WEAK > COMPLETE
+                        sig = sm.group(0)
 
                 output = "\n\n".join(all_outputs)
                 if not output.strip():
@@ -697,10 +713,14 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         f"`[RESEARCH: UNAVAILABLE | data: {'; '.join(queries[:2])}...]`",
                         "research")
 
+                task_label = param
+
+        # ── ANALYST / CRITIC ──────────────────────────────────────────────────
         else:
-            # analyst / critic — always remember=False to prevent cross-call contamination;
-            # pass curated workspace context so each call sees only what it needs
-            ctx = _build_ctx_for(agent_id, workspace)
+            agent_id   = {"CALL_ANALYST": "analyst", "CALL_CRITIC": "critic"}[action]
+            agent      = agents_map[agent_id]
+            exec_phase = phase_map[agent_id]
+            ctx        = _build_ctx_for(agent_id, workspace)
 
             extra = ""
             if agent_id == "analyst":
@@ -716,7 +736,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     extra_context=ctx,
                     max_tokens=max_tokens_map[agent_id],
                     remember=False)
-                await emit(agent, result, phase)
+                await emit(agent, result, exec_phase)
                 output = result
             except AgentCallError as e:
                 err_txt = f"{agent.name} call failed: {e}"
@@ -727,43 +747,56 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     "round": rnd, "agent": agent_id,
                     "task": param, "output": output, "signal": sig,
                 })
-                continue   # supervisor will see the error in workspace next round
+                continue
 
-            # Extract signal tag
             if agent_id == "analyst":
                 am = re.search(r'\[ANALYSIS[^\]]*\]', output, re.IGNORECASE)
                 sig = am.group(0) if am else ""
-                if analyst_called:
+                if first_analysis:
+                    first_analysis = False
+                else:
                     revision_count += 1
-                analyst_called = True
             else:  # critic
                 cm = re.search(r'\[VERDICT[^\]]*\]', output, re.IGNORECASE)
                 sig = cm.group(0) if cm else ""
 
+            task_label = param
+
+        # ── State transition ──────────────────────────────────────────────────
+        new_phase = _next_phase(phase, action, sig, revision_count, verify_count)
+        if action == "CALL_CRITIC" and "REJECT_DATA" in sig.upper():
+            verify_count += 1
+        phase = new_phase
+
         workspace.append({
-            "round": rnd, "agent": agent_id,
-            "task": param, "output": output, "signal": sig,
+            "round":  rnd,
+            "agent":  "researcher" if action == "CALL_RESEARCHER" else agent_id,
+            "task":   task_label if action == "CALL_RESEARCHER" else param,
+            "output": output,
+            "signal": sig,
         })
 
-    # ── Emergency writer fallback if loop exhausted without a report ─────────
-    if not final_report and analyst_called:
+    # ── Emergency writer fallback ─────────────────────────────────────────────
+    if not final_report and any(w["agent"] == "analyst" for w in workspace):
         await emit(react_supervisor,
-            "⚠️ Loop exhausted — emergency writer call to produce final report.", "routing")
+            "⚠️ Loop exhausted — emergency writer call.", "routing")
         ctx = [{"role": "user",
                 "content": f"[{w['agent'].upper()}]\n{w['output'][:600]}"}
                for w in workspace[-6:]]
         rag_note = f"\n\nKNOWLEDGE BASE:\n{rag_context[:800]}" if rag_context else ""
-        emergency_report = await writer.speak(
-            f"Write the complete GTM Intelligence Report for: {topic}. "
-            f"Use all available research and analysis data.{rag_note}",
-            extra_context=ctx, max_tokens=3000)
-        final_report = emergency_report
-        await emit(writer, emergency_report, "writing")
-        workspace.append({
-            "round": MAX_ROUNDS, "agent": "writer",
-            "task": "emergency fallback", "output": emergency_report, "signal": ""})
+        try:
+            emergency_report = await writer.speak(
+                f"Write the complete GTM Intelligence Report for: {topic}. "
+                f"Use all available research and analysis data.{rag_note}",
+                extra_context=ctx, max_tokens=3000)
+            final_report = emergency_report
+            await emit(writer, emergency_report, "writing")
+            workspace.append({
+                "round": MAX_ROUNDS, "agent": "writer",
+                "task": "emergency fallback", "output": emergency_report, "signal": ""})
+        except AgentCallError as e:
+            await emit_error(f"Emergency writer also failed: {e}")
 
-    # ── Extract final report ──────────────────────────────────────────────────
     if not final_report:
         writer_ws = [w for w in workspace if w["agent"] == "writer"]
         final_report = writer_ws[-1]["output"] if writer_ws else "Report generation incomplete."
