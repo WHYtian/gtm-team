@@ -1,25 +1,19 @@
 """
-ReAct Supervisor orchestrator — Phase State Machine Edition.
+ReAct Supervisor orchestrator — Supervisor-Driven Dynamic Routing.
 
 Architecture:
-  Explicit Phase enum replaces ad-hoc force conditions.
-  - Phase defines which actions are VALID at each step
-  - Supervisor LLM reasons and decides among valid actions
-  - State transitions are deterministic based on agent signals
-  - Hard caps per phase prevent deadlock; MAX_ROUNDS is the absolute backstop
+  Supervisor LLM decides every action freely at every step.
+  No phase state machine, no forced transitions.
 
-Phases:
-  RESEARCH  → gather data (supervisor decides: more research or advance)
-  ANALYSIS  → analyst runs (forced; supervisor provides task)
-  CRITIQUE  → critic runs (forced)
-  REVISE    → post-critique (supervisor decides: revise or write)
-  VERIFY    → one targeted search after REJECT_DATA (forced)
-  WRITE     → writer runs (forced → DONE)
+  Single hard safety net:
+    - researcher_calls >= MAX and analyst has never run → force CALL_ANALYST
+    - MAX_ROUNDS exhausted → emergency writer fallback
+
+  Everything else is the supervisor's call.
 """
 import asyncio
 import re
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 
 from team.agent import Agent, AgentCallError
@@ -29,10 +23,8 @@ from team.skills import gather_dimension, web_search, web_scrape
 REPORTS_DIR = Path.home() / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 
-MAX_ROUNDS           = 40   # absolute backstop
-MAX_REVISION_CYCLES  = 3    # analyst revisions after first analysis
-MAX_RESEARCHER_CALLS = 7    # researcher call budget
-MAX_VERIFY           = 1    # max REJECT_DATA verification cycles
+MAX_ROUNDS           = 40   # absolute backstop — emergency writer fires if hit
+MAX_RESEARCHER_CALLS = 7    # hard ceiling; supervisor sees budget and decides earlier
 
 _SUPV = "doubao-seed-2-0-pro-260215"
 
@@ -44,162 +36,73 @@ RESEARCH_DIMS = [
 ]
 
 
-# ── Phase State Machine ────────────────────────────────────────────────────────
-
-class Phase(str, Enum):
-    RESEARCH  = "research"
-    ANALYSIS  = "analysis"
-    CRITIQUE  = "critique"
-    REVISE    = "revise"
-    VERIFY    = "verify"
-    WRITE     = "write"
-
-
-def _valid_actions(phase: Phase, researcher_calls: int,
-                   revision_count: int, verify_count: int) -> list[str]:
-    """Return list of valid ACT keywords for the current phase."""
-    if phase == Phase.RESEARCH:
-        acts = ["CALL_ANALYST"]
-        if researcher_calls < MAX_RESEARCHER_CALLS:
-            acts.insert(0, "CALL_RESEARCHER")
-        return acts
-    elif phase == Phase.REVISE:
-        acts = ["CALL_WRITER"]
-        if revision_count < MAX_REVISION_CYCLES:
-            acts.insert(0, "CALL_ANALYST")
-        return acts
-    elif phase == Phase.ANALYSIS:
-        return ["CALL_ANALYST"]
-    elif phase == Phase.CRITIQUE:
-        return ["CALL_CRITIC"]
-    elif phase == Phase.VERIFY:
-        return ["CALL_RESEARCHER"]
-    elif phase == Phase.WRITE:
-        return ["CALL_WRITER"]
-    return ["CALL_WRITER"]
-
-
-def _next_phase(phase: Phase, action: str, signal: str,
-                revision_count: int, verify_count: int) -> Phase:
-    """Deterministic state transition after an action completes."""
-    sig_up = signal.upper()
-    if action == "CALL_RESEARCHER":
-        return Phase.ANALYSIS if phase == Phase.VERIFY else Phase.RESEARCH
-    elif action == "CALL_ANALYST":
-        return Phase.CRITIQUE
-    elif action == "CALL_CRITIC":
-        if "APPROVED" in sig_up:
-            return Phase.WRITE
-        elif "REJECT_DATA" in sig_up and verify_count < MAX_VERIFY:
-            return Phase.VERIFY
-        else:
-            return Phase.REVISE if revision_count < MAX_REVISION_CYCLES else Phase.WRITE
-    elif action == "CALL_WRITER":
-        return Phase.WRITE
-    return phase
-
-
-def _extract_verify_query(workspace: list) -> str:
-    """Pull the critic's suggested search query from REJECT_DATA verdict."""
-    for w in reversed(workspace):
-        if w["agent"] == "critic":
-            m = re.search(
-                r'\[VERDICT:\s*REJECT_DATA[^|]*\|\s*claim:[^|]*\|\s*search:\s*([^\]]+)\]',
-                w["output"], re.IGNORECASE)
-            if m:
-                return m.group(1).strip()
-    return "verify disputed market data figure"
-
-
-def _default_task(action: str, workspace: list, phase: Phase) -> str:
-    """Generate a deterministic task description when supervisor is not consulted."""
-    if action == "CALL_ANALYST":
-        critics = [w for w in workspace if w["agent"] == "critic"]
-        if critics and phase in (Phase.REVISE, Phase.ANALYSIS):
-            fb = critics[-1]["output"][:400]
-            return (f"Revise your analysis to address the critic's feedback. "
-                    f"Label all figures [Data]/[Estimate]/[Assumption].\n\nCritic: {fb}")
-        return ("Analyse all collected research using TAM/SAM/SOM, PESTEL, and Porter's Five Forces. "
-                "Label every figure [Data], [Estimate], or [Assumption]. "
-                "Present bull and bear perspectives for key conclusions.")
-    elif action == "CALL_CRITIC":
-        return ("Critique the analyst's analysis: unsupported claims, logical gaps, "
-                "suspicious market size figures (check order-of-magnitude), missing evidence.")
-    elif action == "CALL_WRITER":
-        return "Write the complete GTM Intelligence Report including a Competitive Battle Cards section."
-    return ""
-
-
-def _describe_action(action: str, param: str) -> str:
-    labels = {
-        "CALL_RESEARCHER": f"Calling **Alex (Researcher)** — {param[:160]}",
-        "CALL_ANALYST":    f"Calling **Jamie (Analyst)** — {param[:160]}",
-        "CALL_CRITIC":     f"Calling **Morgan (Critic)** — {param[:160]}",
-        "CALL_WRITER":     "Calling **Report Writer** — producing final report",
-    }
-    return labels.get(action, action)
-
-
-# ── Supervisor prompts ─────────────────────────────────────────────────────────
+# ── Supervisor prompts ────────────────────────────────────────────────────────
 
 REACT_SYSTEM = """\
-You are the GTM Intelligence Supervisor. Orchestrate a research team to produce a \
-high-quality, data-rich GTM Intelligence Report.
+You are the GTM Intelligence Supervisor. You decide every action — there is no fixed pipeline.
 
 TEAM:
-  CALL_RESEARCHER — Alex: parallel web searches for market data, statistics, companies
+  CALL_RESEARCHER — Alex: parallel web searches (2-4 sub-queries per call)
   CALL_ANALYST    — Jamie: TAM/SAM/SOM, PESTEL, Porter's Five Forces, [Data]/[Estimate]/[Assumption] labels
-  CALL_CRITIC     — Morgan: challenges claims, checks data quality and order-of-magnitude
-  CALL_WRITER     — Report Writer: final structured GTM Intelligence Report with Battle Cards
+  CALL_CRITIC     — Morgan: quality review
+  CALL_WRITER     — Report Writer: final GTM Intelligence Report with Competitive Battle Cards
 
-The current phase and valid actions are shown in each prompt — only output valid actions.
+━━━ NATURAL PROGRESSION (not enforced — your judgement) ━━━
+1. RESEARCH — 2-3 calls is the norm. Initial 4-dim search covers the baseline.
+   One or two follow-ups to fill key gaps, then move to analyst.
+   If a metric failed 2 searches → not freely available; move on. Analyst will estimate.
 
-━━━ THINK STEP (required, structured) ━━━
-Structure your THINK as:
-  HAVE: What confirmed data do we have? (cite key figures and their sources)
-  GAPS: What critical data is still missing for a complete GTM report?
-  FEASIBLE: Can those gaps be filled with more research, or should we accept estimates?
-  DECISION: Which action best moves toward a high-quality report right now?
+2. CALL_ANALYST — runs frameworks, produces full analysis with confidence labels.
+
+3. CALL_CRITIC — one quality pass.
+   After critique: if analysis is solid or concerns are minor → go straight to CALL_WRITER.
+   Only loop back to CALL_ANALYST for a genuine structural error (wrong framework, major unsupported claim).
+   Do not loop for missing data points — analyst handles those with estimates.
+
+4. CALL_WRITER — final report. Done.
+
+━━━ BIAS: PROGRESS OVER PERFECTION ━━━
+Missing data → analyst estimates it, writer labels it. Don't hold up the report for data \
+that isn't freely available.
+Minor critique concerns → writer addresses inline. One revision loop is the max in practice.
+
+━━━ THINK STEP ━━━
+HAVE: key data confirmed so far (cite figures)
+GAPS: what's still missing
+DECISION: next action and why now
 
 ━━━ ACT FORMAT ━━━
 ACT: CALL_RESEARCHER | queries: q1 || q2 || q3
-ACT: CALL_ANALYST    | task: [frameworks to apply + specific gaps to address]
+ACT: CALL_ANALYST    | task: [frameworks to apply + what to address]
 ACT: CALL_CRITIC     | task: [what to focus on]
 ACT: CALL_WRITER     | task: write final report
 
 ━━━ RESEARCHER QUERY RULES ━━━
-- Keywords only: metric + geography + year — max 12 words per sub-query
-- Separate parallel sub-queries with || (each fires as a separate search + bubble)
-- Avoid paywalled sources: Statista, Gartner PDF, IDC, McKinsey, Forrester
-- Target: Wikipedia, press releases, Reuters/Bloomberg news, government/NGO sites, vendor pages
-- PIVOT RULE: if a metric failed 2+ prior searches → do NOT retry, search a DIFFERENT gap instead
+- Keywords only, max 12 words per sub-query, separated by ||
+- Each || sub-query fires as a separate parallel search and gets its own bubble
+- Avoid paywalled sources: Gartner, IDC, McKinsey, Forrester, Statista
+- PIVOT: if a metric failed 2+ prior searches → search something different entirely
 
-━━━ DATA CONFLICT RULE ━━━
-If two rounds return figures for the same metric differing by 10×+ (e.g. $5M vs $5B):
-flag it in THINK, instruct analyst to use the conservative figure and label the conflict explicitly.
+━━━ DATA CONFLICT ━━━
+Two rounds with 10×+ different figures for the same metric → note in THINK, \
+instruct analyst to use the conservative figure and flag the conflict.
 
-━━━ QUALITY BAR before CALL_WRITER ━━━
-- Market size estimate (even proxied/labelled), growth rate, ≥3 named competitors
-- At least one framework fully applied with evidence
-- Critic has reviewed at least once
-
-THINK: structured as HAVE / GAPS / FEASIBLE / DECISION (3-5 sentences total).
 Respond in the same language as the topic.\
 """
 
 REACT_PROMPT = """\
 Research topic: {topic}
 Round: {rnd}/{max_rounds}
-Phase: **{phase}** | Valid actions this phase: {valid_actions}{budget_warn}
-Analyst revisions used: {revision_count}/{max_revision_cycles} | Researcher calls: {research_count}/{max_researcher_calls}
+Researcher calls: {research_count}/{max_researcher_calls}{budget_warn}
+Analyst called: {analyst_called} | Analyst revisions: {revision_count} | Critic called: {critic_called}
 
-Previously searched (do NOT repeat these):
+Previously searched (do NOT repeat):
 {searched_queries}
 
 WORKSPACE (oldest → newest):
 {workspace}
 
-Your structured assessment and next action (THINK then ACT, only use valid actions):\
+THINK then ACT:\
 """
 
 
@@ -443,14 +346,12 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
             cache_hit["report"], cache_hit["entry_id"], cache_hit["age_days"])
 
     # ── State ─────────────────────────────────────────────────────────────────
-    workspace:        list[dict] = []
-    rag_context       = ""
-    researcher_calls  = 0
-    revision_count    = 0
-    verify_count      = 0
-    first_analysis    = True   # True until analyst has run once
-    final_report      = ""
-    phase             = Phase.RESEARCH
+    workspace:       list[dict] = []
+    rag_context      = ""
+    researcher_calls = 0
+    analyst_called   = False
+    revision_count   = 0
+    final_report     = ""
 
     await emit(react_supervisor,
         f"🚀 **Starting: {topic}**\n\n"
@@ -463,20 +364,10 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
         if any(w["agent"] == "writer" for w in workspace):
             break
 
-        valid = _valid_actions(phase, researcher_calls, revision_count, verify_count)
-
         # ── Determine action ──────────────────────────────────────────────────
 
-        if phase == Phase.VERIFY:
-            # Forced: targeted researcher call using critic's REJECT_DATA search query
-            action    = "CALL_RESEARCHER"
-            param     = _extract_verify_query(workspace)
-            think_txt = ""
-            await emit(react_supervisor,
-                f"🔬 **Round {rnd}:** Verifying disputed claim — {param[:120]}", "routing")
-
-        elif researcher_calls == 0 and "CALL_RESEARCHER" in valid:
-            # Forced: first ever researcher call is always the 4-dim initial search
+        if researcher_calls == 0:
+            # Round 1 is always the initial 4-dim search — no need to ask supervisor
             action    = "CALL_RESEARCHER"
             param     = "initial"
             think_txt = ""
@@ -484,20 +375,24 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 "▶ Calling **Alex (Researcher)** — Initial broad research across 4 dimensions",
                 "routing")
 
-        elif len(valid) == 1:
-            # Forced: only one valid action (ANALYSIS / CRITIQUE / WRITE)
-            action    = valid[0]
-            param     = _default_task(action, workspace, phase)
+        elif researcher_calls >= MAX_RESEARCHER_CALLS and not analyst_called:
+            # Hard safety: budget exhausted but analyst never ran — force it
+            action    = "CALL_ANALYST"
+            param     = ("Researcher budget exhausted. Analyse all collected data using "
+                         "TAM/SAM/SOM, PESTEL, Porter's Five Forces. "
+                         "Label every figure [Data], [Estimate], or [Assumption].")
             think_txt = ""
             await emit(react_supervisor,
-                f"▶ **Round {rnd}:** {_describe_action(action, param)}", "routing")
+                f"⏰ Researcher budget ({MAX_RESEARCHER_CALLS} calls) exhausted — routing to analyst.",
+                "routing")
 
         else:
-            # Dynamic routing: supervisor decides among valid options
-            # (RESEARCH with budget remaining, or REVISE phase)
+            # ── Supervisor decides freely ─────────────────────────────────────
             budget_remaining = MAX_RESEARCHER_CALLS - researcher_calls
-            budget_warn = (f" | ⚠️ {budget_remaining} researcher call(s) left"
+            budget_warn = (f" ⚠️ {budget_remaining} researcher call(s) left — consider advancing"
                            if budget_remaining <= 2 else "")
+
+            critic_called = any(w["agent"] == "critic" for w in workspace)
 
             searched_parts = []
             for w in workspace:
@@ -506,7 +401,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         sq = sq.strip()
                         if sq:
                             searched_parts.append(f"  • {sq[:120]}")
-            searched_block = "\n".join(searched_parts) or "  (none yet — first follow-up)"
+            searched_block = "\n".join(searched_parts) or "  (none yet)"
 
             try:
                 react_raw = await react_supervisor.speak(
@@ -514,33 +409,44 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         topic=topic,
                         rnd=rnd,
                         max_rounds=MAX_ROUNDS,
-                        phase=phase.value,
-                        valid_actions=" | ".join(valid),
                         budget_warn=budget_warn,
-                        revision_count=revision_count,
-                        max_revision_cycles=MAX_REVISION_CYCLES,
                         research_count=researcher_calls,
                         max_researcher_calls=MAX_RESEARCHER_CALLS,
+                        analyst_called="Yes" if analyst_called else "No",
+                        revision_count=revision_count,
+                        critic_called="Yes" if critic_called else "No",
                         searched_queries=searched_block,
                         workspace=_workspace_text(workspace),
                     ),
                     max_tokens=600, remember=False)
             except AgentCallError as e:
                 await emit_error(f"Supervisor failed: {e}")
-                action    = valid[0]
-                param     = _default_task(action, workspace, phase)
+                # Sensible fallback based on current state
+                if not analyst_called:
+                    action, param = "CALL_ANALYST", "Analyse all available research."
+                elif not critic_called:
+                    action, param = "CALL_CRITIC", "Review the analysis."
+                else:
+                    action, param = "CALL_WRITER", "Write the final report."
                 think_txt = ""
             else:
                 think_txt, action, param = _parse_react(react_raw)
-                # Enforce valid actions — never let supervisor escape the phase constraints
-                if action not in valid:
-                    action = valid[0]
-                    param  = _default_task(action, workspace, phase)
+                # Only hard constraint: can't call researcher if budget is gone
+                if action == "CALL_RESEARCHER" and researcher_calls >= MAX_RESEARCHER_CALLS:
+                    action = "CALL_ANALYST" if not analyst_called else "CALL_WRITER"
+                    param  = "Researcher budget exhausted — proceeding with available data."
 
             if think_txt:
                 await emit(react_supervisor, think_txt, "thinking", is_think=True)
+
+            _labels = {
+                "CALL_RESEARCHER": f"Calling **Alex (Researcher)** — {param[:160]}",
+                "CALL_ANALYST":    f"Calling **Jamie (Analyst)** — {param[:160]}",
+                "CALL_CRITIC":     f"Calling **Morgan (Critic)** — {param[:160]}",
+                "CALL_WRITER":     "Calling **Report Writer** — producing final report",
+            }
             await emit(react_supervisor,
-                f"▶ {_describe_action(action, param)}", "routing")
+                f"▶ {_labels.get(action, action)}", "routing")
 
         if action == "DONE":
             break
@@ -722,8 +628,6 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         f"`[RESEARCH: UNAVAILABLE | data: {'; '.join(queries[:2])}...]`",
                         "research")
 
-                task_label = param
-
         # ── ANALYST / CRITIC ──────────────────────────────────────────────────
         else:
             agent_id   = {"CALL_ANALYST": "analyst", "CALL_CRITIC": "critic"}[action]
@@ -751,36 +655,27 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 err_txt = f"{agent.name} call failed: {e}"
                 await emit_error(err_txt, agent)
                 output = f"[ERROR: {err_txt}]"
-                sig    = ""
                 workspace.append({
                     "round": rnd, "agent": agent_id,
-                    "task": param, "output": output, "signal": sig,
+                    "task": param, "output": output, "signal": "",
                 })
                 continue
 
             if agent_id == "analyst":
                 am = re.search(r'\[ANALYSIS[^\]]*\]', output, re.IGNORECASE)
                 sig = am.group(0) if am else ""
-                if first_analysis:
-                    first_analysis = False
-                else:
+                if analyst_called:
                     revision_count += 1
+                analyst_called = True
             else:  # critic
                 cm = re.search(r'\[VERDICT[^\]]*\]', output, re.IGNORECASE)
                 sig = cm.group(0) if cm else ""
 
-            task_label = param
-
-        # ── State transition ──────────────────────────────────────────────────
-        new_phase = _next_phase(phase, action, sig, revision_count, verify_count)
-        if action == "CALL_CRITIC" and "REJECT_DATA" in sig.upper():
-            verify_count += 1
-        phase = new_phase
-
         workspace.append({
             "round":  rnd,
             "agent":  "researcher" if action == "CALL_RESEARCHER" else agent_id,
-            "task":   task_label if action == "CALL_RESEARCHER" else param,
+            "task":   ("initial" if researcher_calls == 1 else param)
+                      if action == "CALL_RESEARCHER" else param,
             "output": output,
             "signal": sig,
         })
