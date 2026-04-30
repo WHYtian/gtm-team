@@ -777,7 +777,13 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 am = re.search(r'\[ANALYSIS[^\]]*\]', output, re.IGNORECASE)
                 sig = am.group(0) if am else ""
                 if analyst_called:
-                    revision_count += 1
+                    # Only count as a quality revision when critic gave feedback before this call.
+                    # Researcher → Analyst (data incorporation) does not consume a revision slot.
+                    last_agent = next(
+                        (w["agent"] for w in reversed(workspace)
+                         if w["agent"] != "researcher"), None)
+                    if last_agent == "critic":
+                        revision_count += 1
                 analyst_called = True
             else:  # critic
                 cm = re.search(r'\[VERDICT[^\]]*\]', output, re.IGNORECASE)
