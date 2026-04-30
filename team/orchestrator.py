@@ -24,7 +24,7 @@ REPORTS_DIR = Path.home() / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 
 MAX_ROUNDS           = 40   # absolute backstop — emergency writer fires if hit
-MAX_RESEARCHER_CALLS = 7    # hard ceiling; supervisor sees budget and decides earlier
+MAX_RESEARCHER_CALLS = 3    # hard ceiling; supervisor sees budget and decides earlier
 
 _SUPV = "doubao-seed-2-0-pro-260215"
 
@@ -42,57 +42,63 @@ REACT_SYSTEM = """\
 You are the GTM Intelligence Supervisor. You decide every action — there is no fixed pipeline.
 
 TEAM:
-  CALL_RESEARCHER — Alex: parallel web searches (2-4 sub-queries per call)
-  CALL_ANALYST    — Jamie: TAM/SAM/SOM, PESTEL, Porter's Five Forces, [Data]/[Estimate]/[Assumption] labels
+  CALL_RESEARCHER — Alex: self-decomposes your directive into 6-8 parallel searches; retries any that find nothing
+  CALL_ANALYST    — Jamie: TAM/SAM/SOM, PESTEL, Porter's Five Forces; labels [Data]/[Estimate]/[Assumption]/[N/A]
   CALL_CRITIC     — Morgan: quality review
   CALL_WRITER     — Report Writer: final GTM Intelligence Report with Competitive Battle Cards
 
 ━━━ DATA RECENCY ━━━
-Always prioritize 2025 data. Request 2024 or earlier only when 2025 is unavailable.
-Add "2025" to research directives where relevant.
+The current year is 2026. Prioritize 2025/2026 data. Fall back to 2024 or earlier only when unavailable.
 
-━━━ NATURAL PROGRESSION (not enforced — your judgement) ━━━
-1. RESEARCH — 2-3 calls is the norm. Initial 4-dim search covers the baseline.
-   One or two follow-ups to fill key gaps, then move to analyst.
-   Each CALL_RESEARCHER covers an ENTIRE dimension (6-8 searches internally).
-   If a dimension returned no useful data → PIVOT to a different angle. Do not retry the same thing.
+━━━ NATURAL PROGRESSION ━━━
+1. RESEARCH — initial 4-dim search runs automatically. You have at most 2 follow-up calls.
+   After initial search: if market size figure OR ≥1 named competitor found → CALL_ANALYST immediately.
+   Reserve follow-up calls for critical gaps that would break a framework section — not for completeness.
 
-2. CALL_ANALYST — runs frameworks, produces full analysis with confidence labels.
+2. CALL_ANALYST — runs full frameworks, labels every figure. Handles missing data with [N/A] or [Estimate].
 
-3. CALL_CRITIC — one quality pass. MANDATORY before writer.
-   After critique: if analysis is solid or concerns are minor → go straight to CALL_WRITER.
-   Only loop back to CALL_ANALYST for a genuine structural error (wrong framework, major unsupported claim).
-   Do not loop for missing data points — analyst handles those with estimates.
+3. CALL_CRITIC — mandatory before writer. One quality pass.
+   After APPROVED or minor concerns → CALL_WRITER directly.
+   After NEEDS_REVISION → follow CRITIC ROUTING below.
 
 4. CALL_WRITER — final report. Done.
 
-━━━ BIAS: PROGRESS OVER PERFECTION ━━━
-Missing data → analyst estimates it, writer labels it. Don't hold up the report for data \
-that isn't freely available.
-Minor critique concerns → writer addresses inline. One revision loop is the max in practice.
+━━━ ANTI-LOOP RULE (STRICT) ━━━
+Researcher internally retries any query that finds nothing. So [RESEARCH: UNAVAILABLE] means \
+two attempts failed — the data is not publicly accessible.
+- NEVER search for a metric already marked [RESEARCH: UNAVAILABLE] in the workspace.
+- CALL_ANALYST immediately; it will write [N/A — data unavailable] for that metric.
+If researcher returns [RESEARCH: WEAK] but has any citable finding → sufficient, advance to analyst.
 
-━━━ THINK STEP ━━━
-HAVE: key data confirmed so far (cite figures)
-GAPS: what's still missing
-DECISION: next action and why now
+━━━ CRITIC ROUTING ━━━
+After [VERDICT: NEEDS_REVISION]:
+  reason: logic_error  → CALL_ANALYST to fix the framework or arithmetic
+  reason: missing_data, AND metric NOT in workspace as UNAVAILABLE → CALL_RESEARCHER (one targeted follow-up)
+  reason: missing_data, AND metric IS UNAVAILABLE in workspace → CALL_ANALYST (label it [N/A], do not re-search)
+
+━━━ FOLLOW-UP SEARCH STRATEGY ━━━
+When using a follow-up researcher call, choose the angle most likely to yield new data:
+  Macro→Micro  — search total market first, then drill: "global cloud software 2025" → "cloud CRM segment share"
+  Framework gap — target a specific missing piece: "Salesforce revenue 2025 market share" for Porter's rivalry data
+  Lateral proxy — find an adjacent metric to derive from: "cloud CRM total users 2025 ARPU" to estimate revenue
 
 ━━━ ACT FORMAT ━━━
-ACT: CALL_RESEARCHER | task: [research directive — which dimension/gap to cover, e.g. "competitive landscape: top vendors pricing market share 2025"]
-ACT: CALL_ANALYST    | task: [frameworks to apply + what to address]
+ACT: CALL_RESEARCHER | task: [broad directive covering a full dimension, e.g. "competitive landscape: top 5 cloud CRM vendors revenue pricing positioning 2025"]
+ACT: CALL_ANALYST    | task: [frameworks to apply + gaps to estimate or label N/A]
 ACT: CALL_CRITIC     | task: [what to focus on]
 ACT: CALL_WRITER     | task: write final report
 
 ━━━ RESEARCHER TASK RULES ━━━
-- Provide a research DIRECTIVE (topic + angle), NOT individual search queries
-- Example: "market size CAGR 2025: global cloud CRM revenue forecast"
-- Researcher will self-decompose into 6-8 specific searches and run them all
-- One CALL_RESEARCHER = one full research dimension — plan broadly, not narrowly
-- PIVOT: if a dimension returned no useful data → request a completely different angle
+- Provide a broad DIRECTIVE, not individual queries. Researcher self-decomposes into 6-8 targeted searches.
+- Make directives wide enough to cover a full dimension in one call.
 - Avoid paywalled sources: Gartner, IDC, McKinsey, Forrester, Statista
 
 ━━━ DATA CONFLICT ━━━
-Two rounds with 10×+ different figures for the same metric → note in THINK, \
-instruct analyst to use the conservative figure and flag the conflict.
+Two rounds with 10×+ different figures → note in THINK, instruct analyst to use conservative figure and flag conflict.
+
+━━━ BIAS: PROGRESS OVER PERFECTION ━━━
+[N/A] and [Estimate] in a report are honest and valuable. Don't hold up the pipeline chasing data \
+that isn't freely available.
 
 Respond in the same language as the topic.\
 """
@@ -197,6 +203,11 @@ def _build_ctx_for(agent_id: str, workspace: list) -> list[dict]:
     return [{"role": "user",
              "content": f"[{w['agent'].upper()} — Round {w['round']}]\n{w['output'][:600]}"}
             for w in workspace[-5:]]
+
+
+def _has_findings(text: str) -> bool:
+    """True if researcher output contains at least one confidence-tagged finding."""
+    return bool(re.search(r'\[(Data|Estimate|Claim)\]', text, re.IGNORECASE))
 
 
 # ── Web helpers ───────────────────────────────────────────────────────────────
@@ -521,16 +532,44 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
 
                 async def _summarize_dim(dr: dict) -> tuple[str, str]:
                     dim, raw = dr["dimension"], dr["text"]
-                    try:
-                        s = await researcher.speak(
+
+                    async def _do_dim_summarize(content: str) -> str:
+                        return await researcher.speak(
                             f'Summarise web data about "{topic}" — {dim.replace("_", " ")}.\n\n'
-                            f'{raw[:3000]}\n\n'
+                            f'{content[:3000]}\n\n'
                             "Use TEMPLATE A (Key Findings + Synthesis + Gaps + Confidence). "
                             "Start immediately with ## — no preamble.",
                             max_tokens=550, remember=False)
+
+                    try:
+                        s = await _do_dim_summarize(raw)
                     except AgentCallError as e:
                         await emit_error(f"Researcher failed on {dim}: {e}", researcher)
-                        s = f"⚠️ Researcher error for {dim}: {e}"
+                        return dim, f"⚠️ Researcher error for {dim}: {e}"
+
+                    # Semantic retry: if no citable findings, try a different search angle
+                    if not _has_findings(s):
+                        try:
+                            alt_q_raw = await researcher.speak(
+                                f'Search for "{topic} — {dim.replace("_", " ")}" found no citable data.\n'
+                                f'Suggest ONE alternative search query (keywords only, max 12 words) '
+                                f'to find {dim.replace("_", " ")} data for "{topic}" from a completely different angle.',
+                                max_tokens=80, remember=False)
+                            alt_q = (alt_q_raw.strip().split('\n')[0]
+                                     .lstrip("•-0123456789.) ").strip()[:200])
+                        except AgentCallError:
+                            alt_q = ""
+
+                        if alt_q:
+                            alt_dr = await gather_dimension(topic, dim, alt_q)
+                            if alt_dr.get("text"):
+                                try:
+                                    s2 = await _do_dim_summarize(alt_dr["text"])
+                                    if _has_findings(s2):
+                                        s = s2  # retry found citable data
+                                except AgentCallError:
+                                    pass  # keep original s
+
                     return dim, s
 
                 dim_summaries = await asyncio.gather(*[_summarize_dim(dr) for dr in dim_results])
@@ -616,25 +655,62 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     if not text:
                         notes = "\n\n❌ Zero results."
                     if not text and not sr.get("sources"):
-                        return (f"## 🔍 — {query}\n\n**Found:** Nothing\n\n"
-                                f"**Not found:** {query}\n\n**Plausibility:** N/A\n\n"
-                                f"**Summary:** No results found.\n\n"
-                                f"[RESEARCH: UNAVAILABLE | data: {query}]")
-                    try:
-                        s = await researcher.speak(
-                            f"Research task: {query}{critic_ctx}\n\n"
-                            f"Sources:\n{sources}\n\n"
-                            f"Content:\n{text[:1800]}{notes}\n\n"
+                        # No results at all — go straight to semantic retry
+                        text, sources, notes = "", "", ""
+
+                    async def _do_query_summarize(q: str, t: str, src: str,
+                                                  extra: str = "") -> str:
+                        return await researcher.speak(
+                            f"Research task: {q}{critic_ctx}\n\n"
+                            f"Sources:\n{src}\n\n"
+                            f"Content:\n{t[:1800]}{extra}\n\n"
                             "Use TEMPLATE B (## 🔍 — <topic> / **Found** / **Not found** / "
                             "**Plausibility** / **Summary**). "
                             "Tag each finding [Data], [Estimate], or [Claim]. "
                             "Cite source URLs. Prefer 2025 sources; note year for all figures. "
                             "End with signal.",
                             max_tokens=550, remember=False)
-                    except AgentCallError as e:
-                        await emit_error(f"Researcher failed on '{query}': {e}", researcher)
-                        s = (f"## 🔍 — {query}\n\n**Found:** Error\n\n"
-                             f"[RESEARCH: WEAK | gaps: summarisation error]")
+
+                    s = ""
+                    if text or sources:
+                        try:
+                            s = await _do_query_summarize(query, text, sources, notes)
+                        except AgentCallError as e:
+                            await emit_error(f"Researcher failed on '{query}': {e}", researcher)
+                            s = (f"## 🔍 — {query}\n\n**Found:** Error\n\n"
+                                 f"[RESEARCH: WEAK | gaps: summarisation error]")
+                            return s
+
+                    # Semantic retry: if no citable findings, try a different search angle
+                    if not _has_findings(s):
+                        try:
+                            alt_q_raw = await researcher.speak(
+                                f'Search for "{query}" found no citable data.\n'
+                                f'Suggest ONE alternative search query (keywords only, max 12 words) '
+                                f'to find this from a completely different angle.',
+                                max_tokens=60, remember=False)
+                            alt_q = (alt_q_raw.strip().split('\n')[0]
+                                     .lstrip("•-0123456789.) ").strip()[:200])
+                        except AgentCallError:
+                            alt_q = ""
+
+                        if alt_q:
+                            alt_sr = await _search_with_retry(alt_q)
+                            if alt_sr.get("text"):
+                                alt_src = _fmt_sources(alt_sr.get("sources", []))
+                                try:
+                                    s2 = await _do_query_summarize(alt_q, alt_sr["text"], alt_src)
+                                    if _has_findings(s2):
+                                        return s2  # retry found citable data
+                                except AgentCallError:
+                                    pass
+
+                        # Both attempts exhausted — return definitive UNAVAILABLE
+                        return (f"## 🔍 — {query}\n\n**Found:** Nothing after retry\n\n"
+                                f"**Not found:** {query}\n\n**Plausibility:** N/A\n\n"
+                                f"**Summary:** No citable data found after two search attempts.\n\n"
+                                f"[RESEARCH: UNAVAILABLE | data: {query}]")
+
                     return s
 
                 query_summaries = await asyncio.gather(

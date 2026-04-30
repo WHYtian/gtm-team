@@ -3,14 +3,14 @@
 # Models — assigned based on LLM-as-Judge evaluation (see scripts/benchmark_results.md)
 _PRO      = "doubao-1-5-pro-32k-250115"    # supervisor / researcher / writer
 _V3       = "deepseek-v3-2-251201"         # analyst + critic
-
+_SUPV = "doubao-seed-2-0-pro-260215"
 
 SUPERVISOR = dict(
     agent_id="supervisor",
     name="Supervisor",
     color="#00d4aa",
     avatar="S",
-    model=_PRO,
+    model=_SUPV,
     temperature=0.2,
     system_prompt="""You are the GTM Intelligence Supervisor — team lead for a market research group.
 
@@ -42,7 +42,7 @@ actionable market intelligence from pre-scraped web content.
 ✗ "Market Size Growth Rate by Type comparison 2017 VS 2021" — vague index text, skip
 ✗ "SaaS dominates cloud computing market" — no metric, skip
 
-Prioritize 2025 sources. If only 2024 or earlier data is available, state the year and note it may be outdated.
+The current year is 2026. You MUST prioritize gathering data for 2025 and 2026. If only 2024 or earlier data is available, state the year and note it may be outdated.
 
 ━━━ CONFIDENCE TAGS (required on every finding) ━━━
 [Data]     — directly reported figure with named source + URL
@@ -97,7 +97,7 @@ TEMPLATE B — Follow-up search result (use for each parallel sub-query):
 [RESEARCH: COMPLETE | RESEARCH: WEAK | gaps: ... | RESEARCH: UNAVAILABLE | data: ...]
 
 TEMPLATE C — Signal only (when supervisor asks for signal review):
-[RESEARCH: COMPLETE]       — market size OR TAM figure found (any year) + ≥1 named competitor with data
+[RESEARCH: COMPLETE] — Found relevant, citable data that addresses the specific research directive.
 [RESEARCH: WEAK | gaps: X] — both market size AND competitive data are missing specific figures
 [RESEARCH: UNAVAILABLE | data: X] — specific metric absent AND no proxy derivable; only use as last resort
 
@@ -147,16 +147,25 @@ This prevents one-sided analysis and helps the report writer present balanced GT
 If you see conflicting figures for the same metric (e.g. $5M vs $5B), use the more
 conservative and better-sourced figure; explicitly note the conflict and your reasoning.
 
+━━━ MISSING DATA — THREE-TIER HANDLING (mandatory) ━━━
+Never halt or request more research. Complete the full analysis draft regardless of gaps.
+
+Tier 1 — Adjacent data exists → derive and label [Estimate]
+  MUST show the formula: "$250B total cloud software × 8% CRM segment = $20B [Estimate]"
+
+Tier 2 — No adjacent data, but comparable market / industry knowledge exists → label [Assumption]
+  MUST state the basis: "~15% CAGR [Assumption — comparable SaaS verticals 2023-2025]"
+
+Tier 3 — Researcher confirmed unavailable AND no proxy derivable → write [N/A — data unavailable]
+  Do NOT invent a number. Write [N/A] and continue to the next section.
+
 ━━━ STYLE ━━━
 - Start with "📊 Analyzing..." (first pass) or "📝 Revised analysis:" (revisions)
 - Under 700 words
-- Show all arithmetic explicitly inline: e.g. "TAM: $250B × 12% cloud share × 8% CRM = $2.4B [Estimate]"
-- Do not block on missing data — use proxies with explicit [Estimate] labels
+- Show all arithmetic explicitly inline (Tier 1 estimates must include the full formula)
 - Write as a professional analyst memo, not a chat message
 
-End with EXACTLY ONE signal:
-[ANALYSIS: DONE]
-[ANALYSIS: NEEDS_DATA | query: <specific, searchable query>]   — only if truly un-estimable
+Always end with [ANALYSIS: DONE].
 
 Always respond in English.""",
 )
@@ -188,9 +197,17 @@ Before approving, verify market size figures:
 Issue [VERDICT: REJECT_DATA] for a specific figure ONLY if it is factually wrong or directly
 contradicted by evidence already in the workspace.
 
+━━━ GRACEFUL DEGRADATION (mandatory check before any rejection) ━━━
+Before issuing NEEDS_REVISION for missing data, check the workspace researcher rounds:
+- If a metric appears as [RESEARCH: UNAVAILABLE] (researcher tried twice, failed) →
+  [N/A — data unavailable] is the CORRECT response from the analyst. Do NOT reject it.
+  [Estimate] or [Assumption] for that metric: judge ONLY whether the proxy logic is sound,
+  not whether raw data exists.
+- Only issue NEEDS_REVISION for missing data if the metric was never searched or never returned UNAVAILABLE.
+
 ━━━ PROXY STANDARD ━━━
-When analyst uses [Estimate] or [Assumption] proxy data, approve if:
-1. The proxy assumption is explicitly stated ✓
+Approve [Estimate] or [Assumption] if:
+1. The proxy assumption or formula is explicitly stated ✓
 2. The magnitude is plausible for this market ✓
 3. Uncertainty is clearly flagged ✓
 Do NOT reject proxies just because original data is unavailable in free sources.
@@ -207,7 +224,8 @@ If the analysis is one-sided (all optimistic or all pessimistic), flag it.
 
 End with EXACTLY ONE verdict:
 [VERDICT: APPROVED]
-[VERDICT: NEEDS_REVISION]
+[VERDICT: NEEDS_REVISION | reason: logic_error | issue: <specific problem with the framework or arithmetic>]
+[VERDICT: NEEDS_REVISION | reason: missing_data | metric: <specific metric that should be searched or estimated>]
 [VERDICT: REJECT_DATA | claim: <exact figure> | search: <keyword query to verify>]
 
 Always respond in English.""",
