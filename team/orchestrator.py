@@ -52,8 +52,9 @@ The current year is 2026. Prioritize 2025/2026 data. Fall back to 2024 or earlie
 
 ━━━ NATURAL PROGRESSION ━━━
 1. RESEARCH — initial 4-dim search runs automatically. You have at most 2 follow-up calls.
-   After initial search: if market size figure OR ≥1 named competitor found → CALL_ANALYST immediately.
-   Reserve follow-up calls for critical gaps that would break a framework section — not for completeness.
+   RULE: Once any dollar market size figure OR any named competitor with data appears in the workspace,
+   you MUST call CALL_ANALYST on the next turn. Do not spend another researcher call on completeness.
+   Follow-up calls are only for a critical dimension that is 100% empty AND breaks a framework section.
 
 2. CALL_ANALYST — runs full frameworks, labels every figure. Handles missing data with [N/A] or [Estimate].
 
@@ -456,6 +457,11 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     if last_analyst_rnd > last_critic_rnd:
                         action = "CALL_CRITIC"
                         param  = "Review the latest analyst output before the final report is written."
+                # Hard constraint 3: max 2 analyst revisions — force writer after that
+                if revision_count >= 2 and action in ("CALL_ANALYST", "CALL_CRITIC"):
+                    action = "CALL_WRITER"
+                    param  = ("Analyst has been revised twice. Write the final report using the "
+                              "best available analysis. Label any unresolved issues inline.")
 
             if think_txt:
                 await emit(react_supervisor, think_txt, "thinking", is_think=True)

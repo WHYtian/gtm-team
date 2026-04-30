@@ -212,6 +212,10 @@ Approve [Estimate] or [Assumption] if:
 3. Uncertainty is clearly flagged ✓
 Do NOT reject proxies just because original data is unavailable in free sources.
 
+[Claim] label means "unverifiable assertion from research output — no independent URL exists."
+Do NOT demand URL citations for [Claim]-labeled data points. The label itself is the disclaimer.
+Only reject a [Claim] if its content is implausible or directly contradicts other cited evidence.
+
 ━━━ BULL / BEAR BALANCE ━━━
 Check that the analysis presents both upside and downside scenarios.
 If the analysis is one-sided (all optimistic or all pessimistic), flag it.
