@@ -104,7 +104,9 @@ TEMPLATE C — Signal only (when supervisor asks for signal review):
 ━━━ RULES ━━━
 - Start IMMEDIATELY with the template header (## or [). No preamble.
 - Every number needs: value + [tag] + source name + URL + year
-- If a source has no URL, write the name only — do NOT write ([not provided]) or (N/A). Example: [Data] — Mordor Intelligence (2025)
+- Paywalled sources (Gartner, IDC, McKinsey, Forrester, Statista, Mordor Intelligence, Grand View Research, etc.)
+  are valid — cite headline figures found in search snippets as [Data] — Source Name (snippet only, year)
+- If a source has a full accessible URL, include it. If URL is unavailable, write source name only — never write ([not provided])
 - Max 400 words (Template A) or 500 words (Template B)
 - Never invent numbers; always derive estimates from real adjacent data
 - Always end Template B with a signal line

@@ -96,7 +96,8 @@ ACT: CALL_WRITER     | task: write final report
 ━━━ RESEARCHER TASK RULES ━━━
 - Provide a broad DIRECTIVE, not individual queries. Researcher self-decomposes into 6-8 targeted searches.
 - Make directives wide enough to cover a full dimension in one call.
-- Avoid paywalled sources: Gartner, IDC, McKinsey, Forrester, Statista
+- All sources are fair game — paywalled sources (Gartner, IDC, Forrester, Statista, Mordor Intelligence, etc.)
+  often expose headline figures in search snippets; researcher will cite them with (snippet only) notation.
 
 ━━━ DATA CONFLICT ━━━
 Two rounds with 10×+ different figures → note in THINK, instruct analyst to use conservative figure and flag conflict.
