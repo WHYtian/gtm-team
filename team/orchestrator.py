@@ -19,6 +19,7 @@ from pathlib import Path
 from team.agent import Agent, AgentCallError
 from team.personas import ANALYST, CRITIC, RESEARCHER, WRITER
 from team.skills import gather_dimension, web_search, web_scrape
+from team.telemetry import Telemetry
 
 REPORTS_DIR = Path.home() / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
@@ -558,6 +559,8 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
             cache_hit["report"], cache_hit["entry_id"], cache_hit["age_days"])
 
     # ── State ─────────────────────────────────────────────────────────────────
+    tel = Telemetry(topic)
+
     workspace:                    list[dict] = []
     rag_context                   = ""
     user_rag_chunks:              list[dict] = []   # topic-relevant user-namespace chunks
@@ -567,6 +570,25 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
     validator_called              = False
     revision_count                = 0
     final_report                  = ""
+
+    # ── Telemetry helpers ─────────────────────────────────────────────────────
+    def _tel_record(agent):
+        s = agent.last_call_stats
+        tel.record_call(rnd, agent.agent_id, agent.model,
+                        s["in_chars"], s["out_chars"], s["duration_s"])
+
+    def _start_res(call_type: str):
+        tel.start_researcher_round(rnd, call_type)
+
+    def _finish_res(queries_gen: int, findings: int, unavail: int,
+                    retries: int, rag_chunks: int):
+        if tel._cur_res:
+            tel._cur_res.queries_generated     = queries_gen
+            tel._cur_res.queries_with_findings = findings
+            tel._cur_res.queries_unavailable   = unavail
+            tel._cur_res.semantic_retries      = retries
+            tel._cur_res.rag_chunks_found      = rag_chunks
+        tel.finish_researcher_round()
 
     await emit(react_supervisor,
         f"🚀 **Starting: {topic}**\n\n"
@@ -638,6 +660,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         workspace=_workspace_text(workspace),
                     ),
                     max_tokens=600, remember=False)
+                _tel_record(react_supervisor)
             except AgentCallError as e:
                 await emit_error(f"Supervisor failed: {e}")
                 # Sensible fallback based on current state
@@ -772,9 +795,16 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 try:
                     result = await synthesizer.speak(
                         synth_input, max_tokens=800, remember=False)
+                    _tel_record(synthesizer)
+                    s = synthesizer.last_call_stats
+                    tel.record_synth(result, s["in_chars"], s["duration_s"])
                 except AgentCallError as e:
                     await emit_error(f"Data Synthesizer failed: {e}", synthesizer)
                     result = "[SYNTHESIS: SKIPPED — error]"
+                tel.synth.web_findings = len(all_findings)
+                tel.synth.rag_chunks   = len(rag_chunks)
+                tel.synth.matched_pairs    = len(matched)
+                tel.synth.supplements      = len(supplements)
             else:
                 result = (
                     f"[SYNTHESIS: SKIPPED — "
@@ -810,6 +840,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 result = await writer.speak(
                     f"Supervisor instruction: {param}{rag_note}",
                     extra_context=_writer_ctx, max_tokens=3000)
+                _tel_record(writer)
             except AgentCallError as e:
                 await emit_error(f"Report Writer failed: {e}", writer)
                 result = ""
@@ -834,6 +865,8 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
 
             if researcher_calls == 1:
                 # Initial parallel search across 4 dimensions
+                _start_res("initial (4-dim)")
+                _res_c = {"queries": 4, "findings": 0, "unavail": 0, "retries": 0}
                 await emit(researcher,
                     f"🔍 **Initial research: *{topic}***\n"
                     "Launching parallel searches across 4 dimensions...", "research")
@@ -852,12 +885,14 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     dim, raw = dr["dimension"], dr["text"]
 
                     async def _do_dim_summarize(content: str) -> str:
-                        return await researcher.speak(
+                        r = await researcher.speak(
                             f'Summarise web data about "{topic}" — {dim.replace("_", " ")}.\n\n'
                             f'{content[:3000]}\n\n'
                             "Use TEMPLATE A (Key Findings + Synthesis + Gaps + Confidence). "
                             "Start immediately with ## — no preamble.",
                             max_tokens=550, remember=False)
+                        _tel_record(researcher)
+                        return r
 
                     try:
                         s = await _do_dim_summarize(raw)
@@ -865,14 +900,19 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         await emit_error(f"Researcher failed on {dim}: {e}", researcher)
                         return dim, f"⚠️ Researcher error for {dim}: {e}"
 
+                    if _has_findings(s):
+                        _res_c["findings"] += 1
+
                     # Semantic retry: if no citable findings, try a different search angle
                     if not _has_findings(s):
+                        _res_c["retries"] += 1
                         try:
                             alt_q_raw = await researcher.speak(
                                 f'Search for "{topic} — {dim.replace("_", " ")}" found no citable data.\n'
                                 f'Suggest ONE alternative search query (keywords only, max 12 words) '
                                 f'to find {dim.replace("_", " ")} data for "{topic}" from a completely different angle.',
                                 max_tokens=80, remember=False)
+                            _tel_record(researcher)
                             alt_q = (alt_q_raw.strip().split('\n')[0]
                                      .lstrip("•-0123456789.) ").strip()[:200])
                         except AgentCallError:
@@ -885,8 +925,15 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                                     s2 = await _do_dim_summarize(alt_dr["text"])
                                     if _has_findings(s2):
                                         s = s2  # retry found citable data
+                                        _res_c["findings"] += 1
+                                    else:
+                                        _res_c["unavail"] += 1
                                 except AgentCallError:
-                                    pass  # keep original s
+                                    _res_c["unavail"] += 1
+                            else:
+                                _res_c["unavail"] += 1
+                        else:
+                            _res_c["unavail"] += 1
 
                     return dim, s
 
@@ -911,6 +958,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         f"Review summaries for \"{topic}\" and emit a signal:\n\n{output[:2000]}\n\n"
                         "Use TEMPLATE C. Reply with ONLY the signal line.",
                         max_tokens=200, remember=False)
+                    _tel_record(researcher)
                 except AgentCallError as e:
                     sig_raw = "[RESEARCH: WEAK | gaps: signal check failed]"
                     await emit_error(f"Researcher signal check failed: {e}", researcher)
@@ -920,10 +968,15 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 await emit(researcher,
                     f"📊 Initial research complete. Signal: `{sig}`", "research")
 
+                _finish_res(_res_c["queries"], _res_c["findings"],
+                            _res_c["unavail"], _res_c["retries"],
+                            len(user_rag_chunks))
                 task_label = "initial"
 
             else:
                 # Follow-up search: researcher self-decomposes supervisor's directive
+                _start_res(f"follow-up #{researcher_calls}")
+                _res_c = {"queries": 0, "findings": 0, "unavail": 0, "retries": 0}
                 directive = param.strip() or topic
 
                 last_critic = next(
@@ -955,6 +1008,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         f"Format: one search query per line, keywords only (max 12 words each), "
                         f"no bullets or numbers.",
                         max_tokens=400, remember=False)
+                    _tel_record(researcher)
                     queries = [
                         ln.strip().lstrip("•-0123456789.) ")
                         for ln in decompose_raw.split("\n")
@@ -964,6 +1018,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     queries = []
                 if not queries:
                     queries = [directive]
+                _res_c["queries"] = len(queries)
 
                 n = len(queries)
                 await emit(researcher,
@@ -992,7 +1047,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
 
                     async def _do_query_summarize(q: str, t: str, src: str,
                                                   extra: str = "") -> str:
-                        return await researcher.speak(
+                        r = await researcher.speak(
                             f"Research task: {q}{critic_ctx}\n\n"
                             f"Sources:\n{src}\n\n"
                             f"Content:\n{t[:1800]}{extra}\n\n"
@@ -1002,6 +1057,8 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                             "Cite source URLs. Prefer 2025 sources; note year for all figures. "
                             "End with signal.",
                             max_tokens=550, remember=False)
+                        _tel_record(researcher)
+                        return r
 
                     s = ""
                     if text or sources:
@@ -1011,16 +1068,22 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                             await emit_error(f"Researcher failed on '{query}': {e}", researcher)
                             s = (f"## 🔍 — {query}\n\n**Found:** Error\n\n"
                                  f"[RESEARCH: WEAK | gaps: summarisation error]")
+                            _res_c["unavail"] += 1
                             return s
+
+                    if _has_findings(s):
+                        _res_c["findings"] += 1
 
                     # Semantic retry: if no citable findings, try a different search angle
                     if not _has_findings(s):
+                        _res_c["retries"] += 1
                         try:
                             alt_q_raw = await researcher.speak(
                                 f'Search for "{query}" found no citable data.\n'
                                 f'Suggest ONE alternative search query (keywords only, max 12 words) '
                                 f'to find this from a completely different angle.',
                                 max_tokens=60, remember=False)
+                            _tel_record(researcher)
                             alt_q = (alt_q_raw.strip().split('\n')[0]
                                      .lstrip("•-0123456789.) ").strip()[:200])
                         except AgentCallError:
@@ -1033,11 +1096,13 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                                 try:
                                     s2 = await _do_query_summarize(alt_q, alt_sr["text"], alt_src)
                                     if _has_findings(s2):
+                                        _res_c["findings"] += 1
                                         return s2  # retry found citable data
                                 except AgentCallError:
                                     pass
 
                         # Both attempts exhausted — return definitive UNAVAILABLE
+                        _res_c["unavail"] += 1
                         return (f"## 🔍 — {query}\n\n**Found:** Nothing after retry\n\n"
                                 f"**Not found:** {query}\n\n**Plausibility:** N/A\n\n"
                                 f"**Summary:** No citable data found after two search attempts.\n\n"
@@ -1069,6 +1134,10 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         f"`[RESEARCH: UNAVAILABLE | data: {directive[:80]}]`",
                         "research")
 
+                _finish_res(_res_c["queries"], _res_c["findings"],
+                            _res_c["unavail"], _res_c["retries"],
+                            len(user_rag_chunks))
+
         # ── ANALYST / CRITIC ──────────────────────────────────────────────────
         else:
             agent_id   = {"CALL_ANALYST": "analyst", "CALL_CRITIC": "critic"}[action]
@@ -1090,6 +1159,9 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     extra_context=ctx,
                     max_tokens=max_tokens_map[agent_id],
                     remember=False)
+                _tel_record(agent)
+                if agent_id == "critic":
+                    tel.record_critic(rnd, result)
                 await emit(agent, result, exec_phase)
                 output = result
             except AgentCallError as e:
@@ -1140,6 +1212,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 f"Write the complete GTM Intelligence Report for: {topic}. "
                 f"Use all available research and analysis data.{rag_note}",
                 extra_context=ctx, max_tokens=3000)
+            _tel_record(writer)
             final_report = emergency_report
             await emit(writer, emergency_report, "writing")
             workspace.append({
@@ -1159,6 +1232,17 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
     stats = " · ".join(f"{a} ×{n}" for a, n in counts.items())
     await emit(react_supervisor,
         f"🎉 **Complete — {topic}**\n\n{len(workspace)} rounds · {stats}", "complete")
+
+    # ── Telemetry ─────────────────────────────────────────────────────────────
+    tel.cache_hit              = bool(cache_hit and cache_hit["hit"] in ("fresh", "stale"))
+    tel.total_rounds           = rnd
+    tel.researcher_calls_pre   = researcher_calls
+    tel.researcher_calls_post  = post_analyst_researcher_calls
+    tel.analyst_revisions      = revision_count
+    try:
+        await loop.run_in_executor(None, tel.save_markdown)
+    except Exception:
+        pass
 
     safe   = "".join(c if c.isalnum() or c in "-_ " else "_" for c in topic)[:40]
     ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")

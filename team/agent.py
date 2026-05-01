@@ -139,13 +139,21 @@ class Agent:
         """
         Generate a response. Runs the blocking LLM call in a thread executor.
         Raises AgentCallError on model errors or timeout.
+
+        After each call, self.last_call_stats is populated with:
+          {duration_s, in_chars, out_chars}
         """
+        self.last_call_stats = {"duration_s": 0.0, "in_chars": 0, "out_chars": 0}
+
         msgs: list[dict] = [{"role": "system", "content": self.system_prompt}]
         msgs.extend(self.history)
         if extra_context:
             msgs.extend(extra_context)
         msgs.append({"role": "user", "content": prompt})
 
+        in_chars = sum(len(m.get("content", "")) for m in msgs)
+
+        t0 = time.time()
         loop = asyncio.get_event_loop()
         try:
             reply = await asyncio.wait_for(
@@ -153,16 +161,27 @@ class Agent:
                 timeout=AGENT_CALL_TIMEOUT,
             )
         except asyncio.TimeoutError:
+            self.last_call_stats.update(duration_s=round(time.time() - t0, 2), in_chars=in_chars)
             raise AgentCallError(
                 f"Agent '{self.name}' timed out after {AGENT_CALL_TIMEOUT}s — "
                 "model may be overloaded"
             )
+
+        self.last_call_stats.update(
+            duration_s=round(time.time() - t0, 2),
+            in_chars=in_chars,
+            out_chars=len(reply),
+        )
 
         if remember:
             self.history.append({"role": "user",      "content": prompt})
             self.history.append({"role": "assistant",  "content": reply})
 
         return reply
+
+    @property
+    def model(self) -> str:
+        return self._model
 
     def reset(self):
         self.history = []
