@@ -266,6 +266,48 @@ _SYNTH_SKIP_FILES = re.compile(
 SIM_THRESHOLD = 0.42  # tuned: 100% recall on true-match pairs, 0 false noise at this value
 
 
+def _last_critic_verdict(workspace: list) -> tuple[str, dict | None]:
+    """Return (VERDICT_TYPE, critic_entry) from the most recent critic output."""
+    for w in reversed(workspace):
+        if w["agent"] == "critic":
+            m = re.search(r'\[VERDICT:\s*(APPROVED|NEEDS_REVISION|REJECT_DATA)',
+                          w["output"], re.IGNORECASE)
+            return (m.group(1).upper() if m else ""), w
+    return "", None
+
+
+def _researcher_after(workspace: list, after_round: int) -> bool:
+    """True if any researcher entry has round > after_round."""
+    return any(w["agent"] == "researcher" and w["round"] > after_round for w in workspace)
+
+
+def _get_user_rag_for_topic(topic: str) -> list[dict]:
+    """Return topic-relevant user-namespace RAG chunks as dicts (no test files)."""
+    try:
+        from rag_mgr import query_rag_multi
+        raw = query_rag_multi(
+            [f"{topic} {dq}" for _, dq in RESEARCH_DIMS],
+            n_per_query=3,
+            namespace_filter="user",
+        )
+        chunks = []
+        for block in raw.split("\n\n---\n\n"):
+            block = block.strip()
+            if not block:
+                continue
+            m = re.match(r'^\[([^\]]+)\]\n(.*)', block, re.DOTALL)
+            if m:
+                fname = m.group(1).strip()
+                if _SYNTH_SKIP_FILES.match(fname):
+                    continue
+                text = m.group(2).strip()
+                if len(text) >= 40:
+                    chunks.append({"text": text[:400], "filename": fname})
+        return chunks
+    except Exception:
+        return []
+
+
 def _extract_finding_texts(workspace: list) -> list[str]:
     """Extract all confidence-tagged finding lines from researcher workspace entries.
 
@@ -518,6 +560,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
     # ── State ─────────────────────────────────────────────────────────────────
     workspace:                    list[dict] = []
     rag_context                   = ""
+    user_rag_chunks:              list[dict] = []   # topic-relevant user-namespace chunks
     researcher_calls              = 0
     post_analyst_researcher_calls = 0
     analyst_called                = False
@@ -607,6 +650,25 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 think_txt = ""
             else:
                 think_txt, action, param = _parse_react(react_raw)
+                # Hard constraints 4 & 5: enforce critic routing rules deterministically.
+                # Applied first so budget constraints (constraint 1) can still apply after.
+                last_verdict, last_critic_w = _last_critic_verdict(workspace)
+                if last_critic_w:
+                    followed_up = _researcher_after(workspace, last_critic_w["round"])
+                    if last_verdict == "REJECT_DATA" and not followed_up:
+                        # REJECT_DATA must route to researcher first (if budget available)
+                        if action != "CALL_RESEARCHER" and post_analyst_researcher_calls < MAX_POST_ANALYST_RESEARCHER:
+                            action = "CALL_RESEARCHER"
+                            sq_m = re.search(r'search:\s*([^\]\n]+)', last_critic_w["output"], re.IGNORECASE)
+                            param = (f"Find alternative source: {sq_m.group(1).strip()[:200]}"
+                                     if sq_m else "Find alternative source for the figure rejected by critic.")
+                    elif last_verdict == "NEEDS_REVISION" and not followed_up:
+                        reason_m = re.search(r'reason:\s*(\w+)', last_critic_w["output"], re.IGNORECASE)
+                        reason = reason_m.group(1).lower() if reason_m else ""
+                        # logic_error must go to analyst — never researcher
+                        if reason == "logic_error" and action == "CALL_RESEARCHER":
+                            action = "CALL_ANALYST"
+                            param = param or "Fix the logical errors in the framework or arithmetic flagged by critic."
                 # Hard constraint 1: enforce researcher budget limits
                 if action == "CALL_RESEARCHER":
                     pre_exhausted  = not analyst_called and researcher_calls >= MAX_RESEARCHER_CALLS
@@ -636,18 +698,18 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 # Hard constraint 0: run Data Synthesizer before the very first analyst call
                 # if user-uploaded RAG data exists (no-op if no user docs).
                 if action == "CALL_ANALYST" and not analyst_called and not validator_called:
-                    has_user_docs = await loop.run_in_executor(None, _get_user_rag_chunks)
-                    if has_user_docs:
+                    if user_rag_chunks:  # populated during initial research — no async call needed
                         action = "CALL_VALIDATOR"
                         param  = "Reconcile web search findings with imported knowledge base."
 
             if think_txt:
                 await emit(react_supervisor, think_txt, "thinking", is_think=True)
 
+            _short = param[:200]  # trim directive in routing labels to avoid verbose messages
             _labels = {
-                "CALL_RESEARCHER": f"Calling **Alex (Researcher)** — {param}",
-                "CALL_ANALYST":    f"Calling **Jamie (Analyst)** — {param}",
-                "CALL_CRITIC":     f"Calling **Morgan (Critic)** — {param}",
+                "CALL_RESEARCHER": f"Calling **Alex (Researcher)** — {_short}",
+                "CALL_ANALYST":    f"Calling **Jamie (Analyst)** — {_short}",
+                "CALL_CRITIC":     f"Calling **Morgan (Critic)** — {_short}",
                 "CALL_WRITER":     "Calling **Report Writer** — producing final report",
                 "CALL_VALIDATOR":  "Calling **Jordan (Synthesizer)** — reconciling web vs imported data",
             }
@@ -670,12 +732,12 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
             # Step 1: extract all researcher findings (full list, not digest-truncated)
             all_findings = _extract_finding_texts(workspace)
 
-            # Step 2: get user RAG chunks (test files excluded) — run in executor (sync ChromaDB call)
-            rag_chunks = await loop.run_in_executor(None, _get_user_rag_chunks)
+            # Step 2: use topic-relevant user chunks already fetched during initial research
+            # (avoids comparing against unrelated docs; avoids a redundant blocking DB call)
+            rag_chunks = user_rag_chunks
 
             if all_findings and rag_chunks:
                 # Step 3: embedding-based pre-filter (pure numpy, no LLM)
-                loop = asyncio.get_event_loop()
                 matched, supplements = await loop.run_in_executor(
                     None, _embed_pair_match, all_findings, rag_chunks, SIM_THRESHOLD)
 
@@ -776,12 +838,14 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     f"🔍 **Initial research: *{topic}***\n"
                     "Launching parallel searches across 4 dimensions...", "research")
 
-                dim_tasks  = [gather_dimension(topic, dk, dq) for dk, dq in RESEARCH_DIMS]
-                rag_task   = loop.run_in_executor(None, _get_rag, topic)
-                dim_results, rag_ctx = await asyncio.gather(
-                    asyncio.gather(*dim_tasks), rag_task)
+                dim_tasks       = [gather_dimension(topic, dk, dq) for dk, dq in RESEARCH_DIMS]
+                rag_task        = loop.run_in_executor(None, _get_rag, topic)
+                user_rag_task   = loop.run_in_executor(None, _get_user_rag_for_topic, topic)
+                dim_results, rag_ctx, user_rag_new = await asyncio.gather(
+                    asyncio.gather(*dim_tasks), rag_task, user_rag_task)
 
                 rag_context = rag_ctx
+                user_rag_chunks = user_rag_new
                 summaries: dict[str, str] = {}
 
                 async def _summarize_dim(dr: dict) -> tuple[str, str]:
@@ -882,9 +946,11 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         f"Never generate 2 queries for the same entity.\n"
                         f"  3. Add market-level queries (size, CAGR) ONLY if the directive "
                         f"explicitly requests market size or growth rate data.\n"
-                        f"  4. Total queries = number of entities + market queries (if requested). "
-                        f"No arbitrary cap — ensure every entity is covered.\n"
-                        f"Example: directive names 6 companies → 6 queries, one per company.\n"
+                        f"  4. Hard cap: maximum 8 queries total. If entities exceed 8, "
+                        f"prioritise: (a) entities most directly named in the directive, "
+                        f"(b) market-level queries last. Drop the least critical ones.\n"
+                        f"Example: directive names 6 companies → 6 queries (one per company) + "
+                        f"up to 2 market queries if requested.\n"
                         f"Include '2025' or '2026' in queries where current data is needed.\n"
                         f"Format: one search query per line, keywords only (max 12 words each), "
                         f"no bullets or numbers.",
@@ -893,7 +959,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         ln.strip().lstrip("•-0123456789.) ")
                         for ln in decompose_raw.split("\n")
                         if ln.strip() and not ln.strip().startswith("#") and len(ln.strip()) > 5
-                    ][:16]  # raised from 8 → 16 to accommodate large entity lists
+                    ][:8]
                 except AgentCallError:
                     queries = []
                 if not queries:

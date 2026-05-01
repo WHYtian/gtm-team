@@ -293,7 +293,10 @@ async def upload_to_kb(file: UploadFile = File(...), session_id: str = Form(...)
 
             result = ingest_document(filename, text, namespace="user")
             if session:
-                await session.q.put({"type": "upload_done", "filename": filename, "chunks": result.get("chunks", 0), "words": result.get("words", 0)})
+                if "error" in result:
+                    await session.q.put({"type": "upload_error", "message": result["error"]})
+                else:
+                    await session.q.put({"type": "upload_done", "filename": filename, "chunks": result.get("chunks", 0), "words": result.get("words", 0)})
         except Exception as e:
             if session:
                 await session.q.put({"type": "upload_error", "message": str(e)})
@@ -330,7 +333,8 @@ async def import_files(files: list[UploadFile] = File(...), namespace: str = For
                     text = content.decode("latin-1")
 
             result = ingest_document(filename, text, namespace=namespace)
-            return {"filename": filename, "status": "ok", **result}
+            ok = "error" not in result
+            return {"filename": filename, "status": ("ok" if ok else "error"), **result}
         except Exception as e:
             return {"filename": filename, "status": "error", "error": str(e)}
 
