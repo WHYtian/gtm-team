@@ -69,6 +69,20 @@ app = FastAPI(title="GTM Team — OpenClaw Multi-Agent")
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 
+@app.on_event("startup")
+async def _warmup():
+    """Pre-load the embedding model in a background thread so first RAG query is instant."""
+    import concurrent.futures
+    def _load():
+        try:
+            from rag_mgr import _get_index
+            _get_index()
+        except Exception:
+            pass
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(concurrent.futures.ThreadPoolExecutor(max_workers=1), _load)
+
+
 # ── Session store ─────────────────────────────────────────────────────────────
 
 class Session:
@@ -240,10 +254,19 @@ async def _handle_chat(session: Session, user_msg: str):
             await q.put({"type": "supervisor_response", "content": resp_text})
 
         else:
-            CHAT_HISTORY.append({"role": "user",       "content": user_msg,   "ts": now()})
-            CHAT_HISTORY.append({"role": "supervisor",  "content": route_resp, "ts": now()})
+            GTM_INVITE = (
+                "\n\n---\n"
+                "*Want a full GTM intelligence report? Just name an industry or market. Examples:*\n"
+                "- *Cloud CRM software in North America*\n"
+                "- *China new energy vehicle (NEV) market*\n"
+                "- *Global HR SaaS competitive landscape*\n"
+                "- *Southeast Asia ride-hailing industry*"
+            )
+            display_resp = route_resp + GTM_INVITE
+            CHAT_HISTORY.append({"role": "user",       "content": user_msg,    "ts": now()})
+            CHAT_HISTORY.append({"role": "supervisor",  "content": display_resp, "ts": now()})
             _save_history(CHAT_HISTORY)
-            await q.put({"type": "supervisor_response", "content": route_resp})
+            await q.put({"type": "supervisor_response", "content": display_resp})
 
         await q.put({"type": "done"})
 

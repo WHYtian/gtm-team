@@ -159,7 +159,7 @@ def _parse_react(text: str) -> tuple[str, str, str]:
         return think, "CALL_ANALYST", "Continue analysis with available research data."
 
     action = act_m.group(1).upper()
-    param  = (act_m.group(2) or "").strip()[:800]
+    param  = (act_m.group(2) or "").strip()
     return think, action, param
 
 
@@ -548,7 +548,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
         safe = "".join(c if c.isalnum() or c in "-_ " else "_" for c in topic)[:40]
         (REPORTS_DIR / f"gtm_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md").write_text(
             cache_hit["report"], encoding="utf-8")
-        return {"report": cache_hit["report"], "topic": topic}
+        return {"report": cache_hit["report"], "topic": topic, "team_messages": team_messages}
 
     stale_report = stale_entry_id = stale_age = None
     if cache_hit and cache_hit["hit"] == "stale":
@@ -728,11 +728,10 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
             if think_txt:
                 await emit(react_supervisor, think_txt, "thinking", is_think=True)
 
-            _short = param[:200]  # trim directive in routing labels to avoid verbose messages
             _labels = {
-                "CALL_RESEARCHER": f"Calling **Alex (Researcher)** — {_short}",
-                "CALL_ANALYST":    f"Calling **Jamie (Analyst)** — {_short}",
-                "CALL_CRITIC":     f"Calling **Morgan (Critic)** — {_short}",
+                "CALL_RESEARCHER": f"Calling **Alex (Researcher)** — {param}",
+                "CALL_ANALYST":    f"Calling **Jamie (Analyst)** — {param}",
+                "CALL_CRITIC":     f"Calling **Morgan (Critic)** — {param}",
                 "CALL_WRITER":     "Calling **Report Writer** — producing final report",
                 "CALL_VALIDATOR":  "Calling **Jordan (Synthesizer)** — reconciling web vs imported data",
             }
@@ -1247,7 +1246,8 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
     safe   = "".join(c if c.isalnum() or c in "-_ " else "_" for c in topic)[:40]
     ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     (REPORTS_DIR / f"gtm_{safe}_{ts_str}.md").write_text(final_report, encoding="utf-8")
-    await loop.run_in_executor(None, lambda: cache_store(topic, topic, final_report, stale_entry_id))
+    if final_report and final_report != "Report generation incomplete.":
+        await loop.run_in_executor(None, lambda: cache_store(topic, topic, final_report, stale_entry_id))
     return {"report": final_report, "topic": topic, "team_messages": team_messages}
 
 
