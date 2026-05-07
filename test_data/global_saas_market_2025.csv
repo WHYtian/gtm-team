@@ -1,0 +1,29 @@
+Year,Market,SaaS_Market_Size_Billion_USD,Growth_Rate_Pct,Major_Players,Data_Source
+2019,Global Cloud Software,102.1,,"Microsoft, Salesforce, SAP, Oracle, Adobe",Gartner 2020
+2020,Global Cloud Software,119.3,16.8,"Microsoft, Salesforce, SAP, Oracle, Adobe",Gartner 2021
+2021,Global Cloud Software,144.2,20.9,"Microsoft, Salesforce, SAP, Oracle, Adobe",Gartner 2022
+2022,Global Cloud Software,171.9,19.2,"Microsoft, Salesforce, SAP, Oracle, Adobe",Gartner 2023
+2023,Global Cloud Software,201.6,17.3,"Microsoft, Salesforce, SAP, Oracle, Adobe",Gartner 2024
+2024,Global Cloud Software,232.0,15.1,"Microsoft, Salesforce, SAP, Oracle, Adobe",Gartner 2025
+2025,Global Cloud Software,263.0,13.4,"Microsoft, Salesforce, SAP, Oracle, Adobe",Gartner Projection
+2019,SaaS Applications,61.0,,"Salesforce, Microsoft, Workday, ServiceNow",IDC 2020
+2020,SaaS Applications,73.6,20.7,"Salesforce, Microsoft, Workday, ServiceNow",IDC 2021
+2021,SaaS Applications,88.9,20.8,"Salesforce, Microsoft, Workday, ServiceNow",IDC 2022
+2022,SaaS Applications,105.0,18.1,"Salesforce, Microsoft, Workday, ServiceNow",IDC 2023
+2023,SaaS Applications,123.7,17.8,"Salesforce, Microsoft, Workday, ServiceNow",IDC 2024
+2024,SaaS Applications,143.0,15.6,"Salesforce, Microsoft, Workday, ServiceNow",IDC 2025
+2025,SaaS Applications,162.0,13.3,"Salesforce, Microsoft, Workday, ServiceNow",IDC Projection
+2022,SaaS CRM,48.0,,"Salesforce (23%), Microsoft (6%), Oracle (5%), SAP (4%)",Grand View Research 2023
+2023,SaaS CRM,55.2,15.0,"Salesforce (23%), Microsoft (6%), Oracle (5%), SAP (4%)",Grand View Research 2024
+2024,SaaS CRM,63.8,15.6,"Salesforce (22%), Microsoft (7%), Oracle (5%), SAP (4%)",Grand View Research 2025
+2025,SaaS CRM,73.1,14.6,"Salesforce (22%), Microsoft (7%), HubSpot (3%), Oracle (4%)",Fortune Business Insights 2025
+2022,SaaS HR,22.0,,"Workday, ADP, SAP SuccessFactors, UKG, BambooHR",Mordor Intelligence 2023
+2023,SaaS HR,25.1,14.1,"Workday, ADP, SAP SuccessFactors, UKG, BambooHR",Mordor Intelligence 2024
+2024,SaaS HR,28.1,12.0,"Workday, ADP, SAP SuccessFactors, UKG, BambooHR",Mordor Intelligence 2025
+2025,SaaS HR,31.0,10.3,"Workday, ADP, SAP SuccessFactors, UKG, BambooHR",Verified Market Research 2025
+2022,Cloud ERP,54.0,,"SAP, Oracle, Microsoft Dynamics, Infor, Workday",Statista 2023
+2023,Cloud ERP,62.2,15.2,"SAP, Oracle, Microsoft Dynamics, Infor, Workday",Statista 2024
+2024,Cloud ERP,71.0,14.1,"SAP, Oracle, Microsoft Dynamics, Workday, IFS",MarketsandMarkets 2025
+2025,Cloud ERP,80.1,12.8,"SAP, Oracle, Microsoft Dynamics, Workday, IFS",MarketsandMarkets 2025
+2024,SaaS Security,28.5,,"CrowdStrike, Palo Alto, Zscaler, Okta, Microsoft",Mordor Intelligence 2025
+2025,SaaS Security,32.8,15.1,"CrowdStrike, Palo Alto, Zscaler, Okta, Microsoft",Mordor Intelligence 2025

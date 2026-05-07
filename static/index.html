@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GTM Team · OpenClaw Native</title>
+<title>GTM Intelligence</title>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
 :root {
@@ -375,7 +375,7 @@ header {
     <div class="logo-icon">G</div>
     <div>
       <div>GTM Intelligence</div>
-      <div style="font-size:11px;color:var(--dim);font-weight:400">OpenClaw-Powered · asyncio Parallel Agents</div>
+      <div style="font-size:11px;color:var(--dim);font-weight:400">Multi-Agent Research Platform</div>
     </div>
   </div>
   <div class="header-right">
@@ -395,7 +395,7 @@ header {
       <div class="agent-pulse"></div>
       <div>
         <div class="panel-title">Supervisor</div>
-        <div class="panel-subtitle">Ask anything · Request research · Analyze documents</div>
+        <div class="panel-subtitle">Ask anything · Request industry research</div>
       </div>
     </div>
 
@@ -419,11 +419,10 @@ header {
         <div>
           <div class="msg-bubble">
             👋 Hi! I'm your GTM Intelligence Supervisor, coordinating a team of AI research agents.<br><br>
-            I can answer general questions directly, or for market research I'll activate the full team:<br><br>
+            I can answer general questions directly, or name an industry and I'll activate the full research team:<br><br>
             🔍 <strong>Alex</strong> (Researcher) · 📊 <strong>Jamie</strong> (Analyst)<br>
             🔎 <strong>Morgan</strong> (Critic) · ✍️ Report Writer<br><br>
-            Try: <em>"Analyze the SaaS CRM market GTM strategy"</em><br>
-            Or upload a document to analyze it.
+            Try: <em>"Cloud CRM market in North America"</em> or <em>"China NEV industry landscape"</em>
           </div>
           <div class="msg-meta">Supervisor · Now</div>
         </div>
@@ -437,7 +436,7 @@ header {
 
     <div class="chat-input-area">
       <div class="input-row">
-        <textarea id="chat-input" placeholder="Ask a question or request market research..." rows="1"></textarea>
+        <textarea id="chat-input" placeholder="Ask anything, or name an industry to research..." rows="1"></textarea>
         <button id="send-btn" onclick="sendMessage()">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
         </button>
@@ -445,12 +444,7 @@ header {
     </div>
 
     <div class="upload-strip">
-      <div class="upload-btn" onclick="document.getElementById('ul-analyze').click()">
-        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        Analyze Doc
-      </div>
       <span id="upload-status" class="upload-status"></span>
-      <input type="file" id="ul-analyze" accept=".pdf,.txt" style="display:none" onchange="uploadFile(this,'analyze')">
     </div>
     </div><!-- end left-chat-panel -->
   </div>
@@ -480,7 +474,7 @@ header {
       <div id="team-messages" class="team-chat-wrap">
         <div class="team-placeholder" id="team-placeholder">
           <div class="ph-icon">👥</div>
-          <p style="max-width:280px;font-size:13px">Watch the research team collaborate in real-time.<br>Send a research request to activate the agents.</p>
+          <p style="max-width:280px;font-size:13px">Watch the research team collaborate in real-time.<br>Name an industry to activate the research agents.</p>
         </div>
       </div>
     </div>
@@ -511,11 +505,12 @@ header {
           ondragleave="this.classList.remove('drag-over')"
           ondrop="handleDrop(event)"
         >
-          <div style="font-size:28px;margin-bottom:8px">📁</div>
-          <div style="font-weight:600;margin-bottom:4px">Drop files or click to upload</div>
-          <div style="font-size:12px">PDF and TXT files · Added to RAG knowledge base</div>
+          <div style="font-size:28px;margin-bottom:4px">📁</div>
+          <div style="font-weight:600;margin-bottom:2px">Drop files or click to upload</div>
+          <div style="font-size:12px">PDF, Excel, CSV, JSON, Markdown, TXT, ZIP · Ingested into RAG knowledge base</div>
+          <div id="docs-upload-status" style="font-size:11px;color:var(--c-supervisor);margin-top:6px;min-height:16px"></div>
         </div>
-        <input type="file" id="docs-file-input" accept=".pdf,.txt" style="display:none" multiple onchange="uploadFilesFromDocs(this)">
+        <input type="file" id="docs-file-input" accept=".pdf,.txt,.csv,.xlsx,.json,.zip,.md" style="display:none" multiple onchange="uploadFilesFromDocs(this)">
         <div id="docs-list"></div>
       </div>
     </div>
@@ -526,6 +521,7 @@ header {
 
 <script>
 const SESSION_ID = 'sess_' + Math.random().toString(36).slice(2, 10);
+const _apiBase = location.pathname.startsWith('/team/') ? '/team' : '';
 const _wsBase = location.pathname.startsWith('/team/') ? '/team/ws' : '/ws';
 const WS_URL = `ws://${location.host}${_wsBase}/${SESSION_ID}`;
 
@@ -536,23 +532,25 @@ let teamCount = 0;
 let lastPhase = '';
 
 const AGENT_META = {
-  supervisor: { name: 'Supervisor',          color: '#00d4aa', avatar: 'S' },
-  researcher: { name: 'Alex · Researcher',   color: '#f472b6', avatar: 'A' },
-  analyst:    { name: 'Jamie · Analyst',     color: '#a78bfa', avatar: 'J' },
-  critic:     { name: 'Morgan · Critic',     color: '#fbbf24', avatar: 'M' },
-  writer:     { name: 'Writer',              color: '#38bdf8', avatar: 'W' },
-  system:     { name: 'System',              color: '#64748b', avatar: '⚙' },
+  supervisor: { name: 'Supervisor',             color: '#00d4aa', avatar: 'S'  },
+  researcher: { name: 'Alex · Researcher',      color: '#f472b6', avatar: 'A'  },
+  analyst:    { name: 'Jamie · Analyst',        color: '#a78bfa', avatar: 'J'  },
+  critic:     { name: 'Morgan · Critic',        color: '#fbbf24', avatar: 'M'  },
+  writer:     { name: 'Writer',                 color: '#38bdf8', avatar: 'W'  },
+  validator:  { name: 'Jordan · Synthesizer',   color: '#34d399', avatar: 'Js' },
+  system:     { name: 'System',                 color: '#64748b', avatar: '⚙'  },
 };
 
 const PHASE_LABELS = {
-  thinking: '🧠 Thinking',
-  routing:  '🔀 Routing',
-  research: '🔍 Research Phase',
-  analysis: '📊 Analysis Phase',
-  critique: '🔎 Quality Review',
-  revision: '📝 Revision',
-  writing:  '✍️ Report Writing',
-  complete: '✅ Complete',
+  thinking:   '🧠 Thinking',
+  routing:    '🔀 Routing',
+  research:   '🔍 Research Phase',
+  analysis:   '📊 Analysis Phase',
+  critique:   '🔎 Quality Review',
+  revision:   '📝 Revision',
+  writing:    '✍️ Report Writing',
+  validation: '🔄 Data Reconciliation',
+  complete:   '✅ Complete',
 };
 
 function safeMarkdown(text) {
@@ -766,7 +764,7 @@ function clearTeamChat() {
   lastPhase = '';
   document.getElementById('team-badge').style.display = 'none';
   const wrap = document.getElementById('team-messages');
-  wrap.innerHTML = '<div class="team-placeholder" id="team-placeholder"><div class="ph-icon">👥</div><p style="max-width:280px;font-size:13px">Watch the research team collaborate in real-time.<br>Send a research request to activate the agents.</p></div>';
+  wrap.innerHTML = '<div class="team-placeholder" id="team-placeholder"><div class="ph-icon">👥</div><p style="max-width:280px;font-size:13px">Watch the research team collaborate in real-time.<br>Name an industry to activate the research agents.</p></div>';
 }
 
 function showTyping(on) {
@@ -827,39 +825,37 @@ function copyReport() {
   navigator.clipboard.writeText(currentReport).then(() => toast('✅ Copied', 'Report copied to clipboard', 'ok'));
 }
 
-// File Upload
-function uploadFile(input, mode) {
-  const file = input.files[0];
-  if (!file) return;
-  const form = new FormData();
-  form.append('file', file);
-  form.append('session_id', SESSION_ID);
-  const endpoint = mode === 'analyze' ? '/api/analyze-doc' : '/api/upload';
-  document.getElementById('upload-status').textContent = 'Uploading ' + file.name + '...';
-  fetch(endpoint, { method:'POST', body:form })
-    .then(r => r.json())
-    .then(d => {
-      if (d.error) toast('❌ Error', d.error, 'error');
-      else if (mode === 'analyze') {
-        toast('📊 Analyzing', 'Analyzing ' + file.name + '...', 'ok');
-        showTyping(true);
-        processing = true;
-        enableInput(false);
-        clearTeamChat();
-        switchTab('team', document.getElementById('tab-btn-team'));
-      }
-    })
-    .catch(e => toast('❌ Error', e.message, 'error'));
-  input.value = '';
-}
 
-function uploadFilesFromDocs(input) {
-  Array.from(input.files).forEach(file => {
-    const form = new FormData();
-    form.append('file', file);
-    form.append('session_id', SESSION_ID);
-    fetch('/api/upload', {method:'POST', body:form}).then(() => refreshDocs());
-  });
+async function uploadFilesFromDocs(input) {
+  const files = Array.from(input.files);
+  if (!files.length) return;
+  const status = document.getElementById('docs-upload-status');
+  const form = new FormData();
+  files.forEach(f => form.append('files', f));
+  form.append('namespace', 'user');
+  status.textContent = `Uploading ${files.length} file(s)...`;
+
+  try {
+    const res = await fetch(_apiBase + '/api/import/files', {method:'POST', body:form});
+    const data = await res.json();
+    const results = data.results || [];
+    let ok = 0, err = 0;
+    results.forEach(r => {
+      if (r.status === 'ok') {
+        toast('📁 Indexed', r.filename + ': ' + r.chunks + ' chunks (' + r.words + ' words)', 'ok');
+        ok++;
+      } else {
+        toast('❌ Import Failed', r.filename + ': ' + (r.error || 'unknown error'), 'error');
+        err++;
+      }
+    });
+    if (ok > 0) refreshDocs();
+    status.textContent = ok ? `Done: ${ok} ingested` + (err ? `, ${err} failed` : '') : '';
+    setTimeout(() => { status.textContent = ''; }, 4000);
+  } catch (e) {
+    status.textContent = '';
+    toast('❌ Upload Error', e.message, 'error');
+  }
   input.value = '';
 }
 
@@ -871,7 +867,7 @@ function handleDrop(ev) {
 
 // Docs
 async function refreshDocs() {
-  const res = await fetch('/api/documents');
+  const res = await fetch(_apiBase + '/api/documents');
   const data = await res.json();
   const docs = data.documents || [];
   const list = document.getElementById('docs-list');
@@ -895,7 +891,7 @@ async function refreshDocs() {
 
 async function delDoc(name) {
   if (!confirm('Remove "' + name + '" from knowledge base?')) return;
-  await fetch('/api/documents/' + encodeURIComponent(name), {method:'DELETE'});
+  await fetch(_apiBase + '/api/documents/' + encodeURIComponent(name), {method:'DELETE'});
   refreshDocs();
 }
 

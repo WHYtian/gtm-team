@@ -115,7 +115,7 @@ h1 { font-size: 16px; font-weight: 700; }
   <div class="logo">R</div>
   <div>
     <div class="h1" style="font-size:16px;font-weight:700">RAG Inspector</div>
-    <div class="subtitle">LlamaIndex · SentenceSplitter · all-MiniLM-L6-v2 · similarity_cutoff=0.35</div>
+    <div class="subtitle">Knowledge Base Inspector</div>
   </div>
   <a class="back-link" href="/">← Back to Platform</a>
 </header>
@@ -137,7 +137,7 @@ h1 { font-size: 16px; font-weight: 700; }
         <input id="q-input" class="search-input" placeholder="Test a query, e.g. 'AI market size 2024'..." />
         <button class="search-btn" onclick="runQuery()">Search KB</button>
       </div>
-      <div class="search-hint">Shows similarity scores, chunk source, and whether each result passes the 0.35 cutoff threshold</div>
+      <div class="search-hint">Shows similarity scores and chunk source for each retrieval result</div>
     </div>
 
     <div class="tabs">
@@ -208,7 +208,6 @@ function renderChunks(chunks, filename) {
   content.innerHTML = `
     <div style="margin-bottom:12px;font-size:12px;color:var(--dim)">
       <strong style="color:var(--text)">${esc(filename)}</strong> — ${chunks.length} chunks
-      (SentenceSplitter · chunk_size=512 tokens · overlap=64)
     </div>
     ${chunks.map((c,i) => `
     <div class="chunk-item">
@@ -316,19 +315,6 @@ async function loadStats() {
       <div class="stat-card"><div class="stat-value">${d.total_docs}</div><div class="stat-label">Documents</div></div>
       <div class="stat-card"><div class="stat-value">${d.total_chunks}</div><div class="stat-label">Total Chunks</div></div>
       <div class="stat-card"><div class="stat-value">${d.avg_chunks_per_doc}</div><div class="stat-label">Avg Chunks/Doc</div></div>
-      <div class="stat-card"><div class="stat-value">${d.embedding_model}</div><div class="stat-label">Embedding Model</div></div>
-    </div>
-    <div style="font-size:12px;color:var(--dim);line-height:1.8;background:var(--surface);padding:14px 16px;border-radius:10px;border:1px solid var(--border);margin-bottom:12px">
-      <div style="font-weight:600;color:var(--text);margin-bottom:8px">Configuration</div>
-      <div>Chunker: <strong>SentenceSplitter</strong> — splits on sentence boundaries</div>
-      <div>Chunk size: <strong>512 tokens</strong> · Overlap: <strong>64 tokens</strong></div>
-      <div>Similarity metric: <strong>Cosine</strong></div>
-      <div>Cutoff threshold: <strong>0.35</strong> — chunks below this are dropped</div>
-      <div>Storage: <strong>ChromaDB</strong> · collection: <em>gtm_llamaindex</em></div>
-      <div style="margin-top:8px">
-        ${d.docs.map(doc => `
-        <div style="margin-top:4px">📄 ${esc(doc.filename.replace(/_/g,' ').replace('.txt',''))} — ${doc.chunks} chunks</div>`).join('')}
-      </div>
     </div>
     <div id="cache-section"></div>`;
   loadCacheStats();

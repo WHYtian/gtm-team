@@ -118,7 +118,7 @@ def build():
         if topic_text_parts:
             combined = f"# {topic_label}\n\n" + "\n\n---\n\n".join(topic_text_parts)
             filename = topic_label.lower().replace(" ", "_").replace("&", "and") + ".txt"
-            result = ingest_document(filename, combined, source_type="scraped")
+            result = ingest_document(filename, combined, source_type="scraped", namespace="platform")
             total_chunks += result.get("chunks", 0)
             total_docs += 1
             print(f"  ✅ Ingested: {result['chunks']} chunks, {result['words']} words")

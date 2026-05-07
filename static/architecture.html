@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GTM Intelligence — Architecture Diagram</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #0b1525;
+  font-family: -apple-system, 'Inter', 'Segoe UI', sans-serif;
+  display: flex; flex-direction: column; align-items: center;
+  padding: 24px; gap: 16px; min-height: 100vh;
+}
+
+/* ── Controls ── */
+.ctrl { display: flex; gap: 10px; align-items: center; }
+.btn {
+  padding: 8px 20px; border-radius: 8px; border: none;
+  cursor: pointer; font-size: 12px; font-weight: 600; transition: opacity .2s;
+}
+.btn-export { background: #00d4aa; color: #000; }
+.btn:hover { opacity: .85; }
+.ratio-label { font-size: 11px; color: #6b7d99; }
+
+/* ═══════════ SLIDE ═══════════ */
+#slide {
+  width: 1060px;
+  background: #122440;
+  border-radius: 14px; overflow: hidden;
+  box-shadow: 0 24px 80px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.06);
+  display: grid;
+  grid-template-rows: 58px 1fr;
+}
+
+/* ── Title bar ── */
+.title-bar {
+  background: linear-gradient(90deg,#132844,#162d52);
+  border-bottom: 1px solid rgba(0,212,170,.25);
+  display: flex; align-items: center; padding: 0 22px; gap: 13px;
+}
+.logo {
+  width: 33px; height: 33px; border-radius: 8px; flex-shrink: 0;
+  background: linear-gradient(135deg,#00d4aa,#7c3aed);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 17px; font-weight: 900; color: #fff;
+}
+.t-main { font-size: 15px; font-weight: 700; color: #f1f5f9; }
+.t-sub { font-size: 10px; color: #99aabf; margin-top: 1px; }
+.pills { margin-left: auto; display: flex; gap: 6px; }
+.pill {
+  padding: 3px 10px; border-radius: 20px;
+  font-size: 9px; font-weight: 700; letter-spacing: .4px;
+}
+.p-green  { background:rgba(0,212,170,.15); color:#00d4aa; border:1px solid rgba(0,212,170,.3); }
+.p-purple { background:rgba(124,58,237,.15); color:#a78bfa; border:1px solid rgba(124,58,237,.3); }
+.p-blue   { background:rgba(56,189,248,.15); color:#38bdf8; border:1px solid rgba(56,189,248,.3); }
+.p-pink   { background:rgba(244,114,182,.15); color:#f472b6; border:1px solid rgba(244,114,182,.3); }
+
+/* ── Body ── */
+.body {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+}
+
+/* ── Left: Pipeline ── */
+.col-pipe {
+  padding: 14px 18px;
+  display: flex; flex-direction: column; gap: 0;
+  border-right: 1px solid rgba(255,255,255,.06);
+}
+.col-pipe .sec { text-align: center; }
+
+/* ── Right: Tech Stack + Innovations ── */
+.col-side {
+  padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+  background: rgba(0,0,0,.15);
+}
+
+.sec { font-size: 10px; font-weight: 700; text-transform: uppercase;
+       letter-spacing: 1.5px; color: #6b7d99; margin-bottom: 4px; }
+
+/* ── Tech stack ── */
+.tg { margin-bottom: 7px; }
+.tg-head { font-size: 10px; font-weight: 700; color: #6b7d99;
+           text-transform: uppercase; letter-spacing: .8px; margin-bottom: 5px; }
+.tr { display: flex; align-items: flex-start; gap: 7px; margin-bottom: 4px; }
+.td { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; margin-top: 5px; }
+.tn { font-size: 11px; font-weight: 600; color: #e2e8f0; line-height: 1.35; }
+.ts { font-size: 9.5px; color: #8899b0; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip {
+  background: rgba(255,255,255,.05);
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 5px; padding: 3px 8px;
+  font-size: 9.5px; color: #8899b0;
+  display: flex; align-items: center; gap: 5px;
+}
+.chip-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+
+/* ── CSS Arrows ── */
+.arr-dn {
+  display: flex; flex-direction: column; align-items: center;
+  margin: 1px 0;
+}
+.arr-dn-line { width: 1px; height: 10px; background: #556b8a; }
+.arr-dn-head {
+  width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 6px solid #556b8a;
+}
+.arr-up {
+  display: flex; flex-direction: column; align-items: center;
+  margin: 1px 0;
+}
+.arr-up-head {
+  width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-bottom: 6px solid #556b8a;
+}
+.arr-up-line { width: 1px; height: 8px; background: #556b8a; }
+.arr-rt {
+  display: flex; align-items: center; flex-shrink: 0;
+}
+.arr-rt-line { width: 10px; height: 1px; background: #556b8a; }
+.arr-rt-head {
+  width: 0; height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 6px solid #556b8a;
+}
+
+/* ── Flow top ── */
+.flow-top {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+}
+.u-node {
+  background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12);
+  border-radius: 8px; padding: 6px 10px; text-align: center; flex-shrink: 0;
+}
+.u-node .ui { font-size: 16px; }
+.u-node .ul { font-size: 10px; color: #8899b0; margin-top: 2px; }
+.route-box {
+  flex: 1; background: rgba(0,212,170,.06);
+  border: 1px solid rgba(0,212,170,.2);
+  border-radius: 6px; padding: 6px 10px;
+  font-size: 12px; color: #00d4aa; line-height: 1.5;
+}
+.route-box span { color: #8899b0; }
+
+/* ── Agent card ── */
+.ac {
+  width: 100%; border-radius: 8px;
+  padding: 7px 10px; border: 1px solid;
+  display: flex; align-items: flex-start; gap: 9px;
+  position: relative; flex-shrink: 0;
+}
+.av {
+  width: 28px; height: 28px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 800; flex-shrink: 0;
+}
+.ai { flex: 1; min-width: 0; }
+.an { font-size: 13px; font-weight: 700; }
+.ar { font-size: 11px; color: #99aabf; margin-top: 2px; line-height: 1.3; }
+.opt-lbl { position: absolute; top: 3px; right: 8px;
+            font-size: 9.5px; color: #6b7d99; }
+
+/* ── Hub card ── */
+.hub-card {
+  background: rgba(0,212,170,.04);
+  border: 1px solid rgba(0,212,170,.28);
+  border-radius: 10px; padding: 9px 14px;
+  box-shadow: 0 0 20px rgba(0,212,170,.04);
+}
+.hub-header { display: flex; align-items: center; gap: 9px; margin-bottom: 7px; }
+.hub-av {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: rgba(0,212,170,.18); color: #00d4aa;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; font-weight: 800; flex-shrink: 0;
+}
+.hub-title { font-size: 14px; font-weight: 700; color: #00d4aa; }
+.react-inner {
+  display: flex; align-items: center; gap: 7px; margin-bottom: 7px;
+  padding: 5px 10px; background: rgba(0,0,0,.25);
+  border-radius: 6px; border: 1px solid rgba(255,255,255,.05);
+}
+.react-step {
+  font-size: 11px; padding: 3px 10px; border-radius: 4px;
+  background: rgba(0,212,170,.1); color: #00d4aa; font-weight: 600;
+}
+.react-step-hc { background: rgba(124,58,237,.1); color: #a78bfa; }
+.react-arr { color: #556b8a; font-size: 11px; flex-shrink: 0; }
+.hub-sigs { display: flex; gap: 10px; }
+.hub-sig {
+  font-size: 10px; padding: 3px 10px; border-radius: 4px;
+  flex: 1; text-align: center;
+}
+.hub-sig-up { background: rgba(167,139,250,.08); color: #a78bfa; border: 1px solid rgba(167,139,250,.15); }
+.hub-sig-dn { background: rgba(0,212,170,.08); color: #00d4aa; border: 1px solid rgba(0,212,170,.15); }
+
+/* ── Fan-out arrows ── */
+.fan-out { display: flex; text-align: center; gap: 4px; }
+.fan-col {
+  flex: 1; padding: 5px 3px 0;
+  display: flex; flex-direction: column; align-items: center;
+  position: relative;
+}
+.fan-col::before {
+  content: ''; position: absolute; top: 0; left: 50%;
+  width: 1px; height: 100%;
+  background: #556b8a;
+  transform: translateX(-50%);
+}
+.fan-col::after {
+  content: ''; position: absolute; bottom: -6px; left: 50%;
+  transform: translateX(-50%);
+  width: 0; height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 6px solid #556b8a;
+}
+.fan-col-opt::before { opacity: .45; }
+.fan-col-opt::after { opacity: .45; }
+.fan-lbl { font-size: 11px; color: #00d4aa; font-weight: 600; margin-bottom: 2px; position: relative; z-index: 1; }
+.fan-col-opt .fan-lbl { color: #8899b0; }
+.fan-sub { font-size: 9px; color: #556b8a; position: relative; z-index: 1; }
+
+/* ── Agent row ── */
+.agent-row { display: flex; gap: 7px; }
+.agent-row .ac { flex: 1; padding: 7px 9px; }
+.agent-row .av { width: 24px; height: 24px; font-size: 10px; }
+.agent-row .an { font-size: 11px; }
+.agent-row .ar { font-size: 9.5px; }
+
+/* ── Degradation edge ── */
+.deg-note {
+  font-size: 11px; color: #f59e0b; text-align: center;
+  padding: 5px 12px; margin: 4px 0;
+  border: 1px dashed rgba(245,158,11,.2);
+  border-radius: 5px; background: rgba(245,158,11,.04);
+}
+
+/* ── Return flow ── */
+.ret-row { display: flex; gap: 6px; }
+.ret-it {
+  flex: 1; font-size: 10px; text-align: center;
+  padding: 3px 6px; border-radius: 3px;
+  background: rgba(167,139,250,.06); color: #a78bfa;
+  border: 1px solid rgba(167,139,250,.12);
+}
+.ret-it-dn { color: #99aabf; background: rgba(255,255,255,.03); border-color: rgba(255,255,255,.07); }
+
+/* ── Critic verdict split ── */
+.v-split { display: flex; flex-direction: column; gap: 3px; justify-content: center; padding: 2px 8px; }
+.v-ok {
+  font-size: 10px; padding: 4px 8px; border-radius: 4px; text-align: center;
+  background: rgba(52,211,153,.08); color: #34d399; border: 1px solid rgba(52,211,153,.2);
+}
+.v-rev {
+  font-size: 10px; padding: 4px 8px; border-radius: 4px; text-align: center;
+  background: rgba(251,191,36,.08); color: #fbbf24; border: 1px solid rgba(251,191,36,.2);
+}
+.v-reroute { font-size: 9.5px; color: #6b7d99; text-align: center; margin-top: 2px; }
+.v-arr-label { font-size: 11px; color: #6b7d99; text-align: center; padding: 3px; font-weight: 600; }
+
+/* ── Innovations ── */
+.hl {
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 7px; padding: 8px 10px;
+}
+.hl-n { font-size: 16px; font-weight: 800; color: #00d4aa; line-height: 1; }
+.hl-l { font-size: 11.5px; font-weight: 600; color: #e2e8f0; margin-top: 2px; }
+.hl-d { font-size: 10px; color: #99aabf; margin-top: 3px; line-height: 1.5; }
+
+/* ═══════════ PORTRAIT ═══════════ */
+#slide-portrait {
+  display: none;
+  width: 720px;
+  background: #122440;
+  border-radius: 14px; overflow: hidden;
+  box-shadow: 0 24px 80px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.06);
+  flex-direction: column;
+}
+</style>
+</head>
+<body>
+
+<div class="ctrl">
+  <button class="btn btn-export" onclick="exportNow('landscape')">Export 4:3 PNG</button>
+  <button class="btn btn-export" onclick="exportNow('portrait')" style="background:#a78bfa">Export 3:4 PNG</button>
+  <span class="ratio-label">· 2x resolution</span>
+</div>
+
+<!-- ═══════════ LANDSCAPE ═══════════ -->
+<div id="slide">
+
+  <div class="title-bar">
+    <div class="logo">G</div>
+    <div>
+      <div class="t-main">GTM Intelligence Research Platform</div>
+      <div class="t-sub">Multi-Agent Industry Research · ReAct Supervisor · Dynamic Routing</div>
+    </div>
+    <div class="pills">
+      <span class="pill p-green">Python asyncio</span>
+      <span class="pill p-purple">6 Agents</span>
+      <span class="pill p-blue">FastAPI + WS</span>
+      <span class="pill p-pink">RAG + Cache</span>
+    </div>
+  </div>
+
+  <div class="body">
+
+    <!-- ── LEFT: Pipeline ── -->
+    <div class="col-pipe">
+      <div class="sec" style="margin-bottom:8px">Research Pipeline · ReAct Hub &amp; Spoke</div>
+
+      <!-- User + routing -->
+      <div class="flow-top">
+        <div class="u-node">
+          <div class="ui">&#x1F4AC;</div>
+          <div class="ul">User</div>
+        </div>
+        <div class="arr-rt">
+          <div class="arr-rt-line"></div>
+          <div class="arr-rt-head"></div>
+        </div>
+        <div class="route-box">
+          Smart Routing: is it industry research?<br>
+          <span>Yes &rarr; GTM pipeline &nbsp;&middot;&nbsp; No &rarr; direct LLM reply + GTM invite</span>
+        </div>
+      </div>
+
+      <div class="arr-dn">
+        <div class="arr-dn-line"></div>
+        <div class="arr-dn-head"></div>
+      </div>
+
+      <!-- Supervisor Hub Card -->
+      <div class="hub-card">
+        <div class="hub-header">
+          <div class="hub-av">S</div>
+          <div class="hub-title">Supervisor &middot; ReAct Router</div>
+        </div>
+        <div class="react-inner">
+          <span class="react-step">THINK</span>
+          <span class="react-arr">&rarr;</span>
+          <span class="react-step">ACT</span>
+          <span class="react-arr">&rarr;</span>
+          <span class="react-step react-step-hc">6 Hard Constraints Apply</span>
+        </div>
+        <div class="hub-sigs">
+          <span class="hub-sig hub-sig-up">Data Returns (findings, draft, reconciled pairs)</span>
+          <span class="hub-sig hub-sig-dn">Dispatch (RESEARCHER &middot; ANALYST &middot; VALIDATOR &middot; WRITER)</span>
+        </div>
+      </div>
+
+      <!-- Fan-out arrows -->
+      <div class="fan-out" style="margin-top:6px;margin-bottom:2px">
+        <div class="fan-col">
+          <div class="fan-lbl">CALL_RESEARCHER</div>
+          <div class="fan-sub">parallel 4-dim search</div>
+        </div>
+        <div class="fan-col">
+          <div class="fan-lbl">CALL_ANALYST</div>
+          <div class="fan-sub">strategic analysis</div>
+        </div>
+        <div class="fan-col fan-col-opt">
+          <div class="fan-lbl">CALL_VALIDATOR</div>
+          <div class="fan-sub">optional fact-check</div>
+        </div>
+      </div>
+
+      <!-- Agent Cards Row -->
+      <div class="agent-row" style="margin-top:8px">
+        <div class="ac" style="background:rgba(244,114,182,.05);border-color:rgba(244,114,182,.3)">
+          <div class="av" style="background:rgba(244,114,182,.18);color:#f472b6">A</div>
+          <div class="ai">
+            <div class="an" style="color:#f472b6">Alex &middot; Researcher</div>
+            <div class="ar">market / competitive / tech / regulatory &middot; [Data]/[Estimate]</div>
+          </div>
+        </div>
+        <div class="ac" style="background:rgba(167,139,250,.05);border-color:rgba(167,139,250,.3)">
+          <div class="av" style="background:rgba(167,139,250,.18);color:#a78bfa">J</div>
+          <div class="ai">
+            <div class="an" style="color:#a78bfa">Jamie &middot; Analyst</div>
+            <div class="ar">TAM/SAM/SOM &middot; PESTEL &middot; Porter's 5 Forces</div>
+          </div>
+        </div>
+        <div class="ac" style="background:rgba(52,211,153,.05);border-color:rgba(52,211,153,.2);opacity:.82">
+          <div class="opt-lbl">optional</div>
+          <div class="av" style="background:rgba(52,211,153,.15);color:#34d399">J</div>
+          <div class="ai">
+            <div class="an" style="color:#34d399">Jordan &middot; Synth</div>
+            <div class="ar">Web &harr; RAG reconcile &middot; cosine &ge; 0.42</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Return flow -->
+      <div class="ret-row" style="margin-top:5px">
+        <div class="ret-it">[Data] / [Estimate] / [Claim]</div>
+        <div class="ret-it ret-it-dn">Draft / Analysis</div>
+        <div class="ret-it" style="color:#34d399">Reconciled pairs</div>
+      </div>
+
+      <!-- Return arrows (upward) -->
+      <div style="display:flex;gap:6px;margin-top:2px">
+        <div class="arr-up" style="flex:1">
+          <div class="arr-up-head"></div>
+          <div class="arr-up-line"></div>
+        </div>
+        <div class="arr-up" style="flex:1;opacity:.5">
+          <div class="arr-up-head"></div>
+          <div class="arr-up-line"></div>
+        </div>
+        <div class="arr-up" style="flex:1;opacity:.25"></div>
+      </div>
+
+      <!-- Graceful Degradation -->
+      <div class="deg-note" style="margin-top:5px">
+        Graceful Degradation: [RESEARCH: UNAVAILABLE] &rarr; Analyst derives [Estimate] as fallback
+      </div>
+
+      <!-- Critic + Writer with feedback loop -->
+      <div style="display:flex;gap:7px;align-items:stretch;margin-top:6px">
+        <div class="ac" style="flex:1;background:rgba(251,191,36,.05);border-color:rgba(251,191,36,.25);padding:7px 10px">
+          <div class="av" style="width:26px;height:26px;font-size:11px;background:rgba(251,191,36,.15);color:#fbbf24">M</div>
+          <div class="ai">
+            <div class="an" style="font-size:11.5px;color:#fbbf24">Morgan &middot; Critic</div>
+            <div class="ar" style="font-size:9.5px">Quality review &middot; verdict-based routing</div>
+          </div>
+        </div>
+        <div class="v-split" style="flex:1.1">
+          <div class="v-ok">APPROVED &rarr; <b>Writer</b></div>
+          <div class="v-rev">NEEDS_REVISION &rarr; <b>Supervisor</b> (re-route)</div>
+          <div class="v-reroute">missing data &rarr; Researcher &nbsp;|&nbsp; logic error &rarr; Analyst</div>
+        </div>
+      </div>
+
+      <!-- Arrow to Writer -->
+      <div class="v-arr-label">APPROVED</div>
+      <div class="arr-dn">
+        <div class="arr-dn-line"></div>
+        <div class="arr-dn-head"></div>
+      </div>
+
+      <!-- Writer -->
+      <div class="ac" style="background:rgba(56,189,248,.05);border-color:rgba(56,189,248,.25);max-width:200px;margin:0 auto;padding:7px 10px">
+        <div class="av" style="width:26px;height:26px;font-size:11px;background:rgba(56,189,248,.15);color:#38bdf8">W</div>
+        <div class="ai">
+          <div class="an" style="font-size:11.5px;color:#38bdf8">Writer</div>
+          <div class="ar" style="font-size:9.5px">GTM Report + Battle Cards &middot; Markdown</div>
+        </div>
+      </div>
+
+      <!-- Demo Screenshots -->
+      <div style="margin-top:10px">
+        <div style="display:flex;gap:10px">
+          <a href="/static/demo/demo1.png" target="_blank" style="flex:1;display:block;border-radius:6px;overflow:hidden;border:1px solid rgba(255,255,255,.08);transition:border-color .2s" onmouseover="this.style.borderColor='rgba(0,212,170,.35)'" onmouseout="this.style.borderColor='rgba(255,255,255,.08)'">
+            <img src="/static/demo/demo1.png" style="width:100%;display:block" alt="Demo 1">
+          </a>
+          <a href="/static/demo/demo2.png" target="_blank" style="flex:1;display:block;border-radius:6px;overflow:hidden;border:1px solid rgba(255,255,255,.08);transition:border-color .2s" onmouseover="this.style.borderColor='rgba(0,212,170,.35)'" onmouseout="this.style.borderColor='rgba(255,255,255,.08)'">
+            <img src="/static/demo/demo2.png" style="width:100%;display:block" alt="Demo 2">
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── RIGHT: Tech Stack + Innovations ── -->
+    <div class="col-side">
+      <div class="sec">Tech Stack</div>
+
+      <div class="tg">
+        <div class="tg-head">API & Serving</div>
+        <div class="tr">
+          <div class="td" style="background:#00d4aa"></div>
+          <div><div class="tn">FastAPI + WebSocket</div><div class="ts">SSE streaming · real-time output</div></div>
+        </div>
+        <div class="tr">
+          <div class="td" style="background:#38bdf8"></div>
+          <div><div class="tn">Nginx Reverse Proxy</div><div class="ts">WS upgrade · path routing</div></div>
+        </div>
+      </div>
+
+      <div class="tg">
+        <div class="tg-head">Knowledge & Retrieval</div>
+        <div class="tr">
+          <div class="td" style="background:#a78bfa"></div>
+          <div><div class="tn">ChromaDB + LlamaIndex</div><div class="ts">Vector store · chunk indexing</div></div>
+        </div>
+        <div class="tr">
+          <div class="td" style="background:#34d399"></div>
+          <div><div class="tn">all-MiniLM-L6-v2</div><div class="ts">Local HuggingFace embeddings</div></div>
+        </div>
+        <div class="tr">
+          <div class="td" style="background:#f472b6"></div>
+          <div><div class="tn">Semantic Cache</div><div class="ts">Topic similarity · skip re-research</div></div>
+        </div>
+      </div>
+
+      <div class="tg">
+        <div class="tg-head">LLM Backend</div>
+        <div class="tr">
+          <div class="td" style="background:#fbbf24"></div>
+          <div><div class="tn">Doubao · DeepSeek</div><div class="ts">OpenAI-compatible · per-agent</div></div>
+        </div>
+        <div class="tr">
+          <div class="td" style="background:#64748b"></div>
+          <div><div class="tn">asyncio ThreadPool</div><div class="ts">4-dim parallel execution</div></div>
+        </div>
+      </div>
+
+      <div class="tg">
+        <div class="tg-head">Storage</div>
+        <div class="chips">
+          <div class="chip"><div class="chip-dot" style="background:#a78bfa"></div>ChromaDB</div>
+          <div class="chip"><div class="chip-dot" style="background:#34d399"></div>Local FS</div>
+          <div class="chip"><div class="chip-dot" style="background:#64748b"></div>JSON Chat Hist</div>
+        </div>
+      </div>
+
+      <div class="sec" style="margin-top:4px">Key Innovations</div>
+
+      <div class="hl">
+        <div class="hl-n">1</div>
+        <div class="hl-l">ReAct + Dual Budget</div>
+        <div class="hl-d">Supervisor routes freely; independent Pre/Post-Analyst research budgets prevent over-search and resource waste</div>
+      </div>
+
+      <div class="hl">
+        <div class="hl-n">2</div>
+        <div class="hl-l">6 Hard Constraints</div>
+        <div class="hl-d">Python-level deterministic safety net overrides LLM routing; REJECT_DATA and logic_error always take the correct path</div>
+      </div>
+
+      <div class="hl">
+        <div class="hl-n">3</div>
+        <div class="hl-l">Semantic Cache</div>
+        <div class="hl-d">Similar topic vector cache hit returns report directly, skipping the full pipeline for sub-second response</div>
+      </div>
+
+      <div class="hl">
+        <div class="hl-n">4</div>
+        <div class="hl-l">Smart Routing</div>
+        <div class="hl-d">Industry research &rarr; full GTM pipeline; general questions &rarr; direct LLM reply, precise resource allocation</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ═══════════ PORTRAIT 3:4 ═══════════ -->
+<div id="slide-portrait" style="display:none;flex-direction:column">
+
+  <div class="title-bar">
+    <div class="logo">G</div>
+    <div>
+      <div class="t-main">GTM Intelligence Research Platform</div>
+      <div class="t-sub">Multi-Agent Industry Research · ReAct Supervisor · Dynamic Routing</div>
+    </div>
+    <div class="pills">
+      <span class="pill p-green">asyncio</span>
+      <span class="pill p-purple">6 Agents</span>
+      <span class="pill p-blue">RAG</span>
+    </div>
+  </div>
+
+  <!-- Body: pipeline left, side right -->
+  <div style="flex:1;display:grid;grid-template-columns:1fr 280px">
+
+    <!-- Pipeline -->
+    <div style="padding:10px 14px;display:flex;flex-direction:column;gap:0;overflow-y:auto;border-right:1px solid rgba(255,255,255,.06)">
+      <div class="sec" style="text-align:center;margin-bottom:4px">Research Pipeline · ReAct Hub &amp; Spoke</div>
+
+      <div class="flow-top" style="margin-bottom:2px">
+        <div class="u-node"><div class="ui">&#x1F4AC;</div><div class="ul">User</div></div>
+        <div class="arr-rt"><div class="arr-rt-line"></div><div class="arr-rt-head"></div></div>
+        <div class="route-box" style="font-size:11px">Smart Routing: industry research &rarr; GTM · general &rarr; direct reply</div>
+      </div>
+
+      <div class="arr-dn"><div class="arr-dn-line"></div><div class="arr-dn-head"></div></div>
+
+      <div class="hub-card" style="padding:7px 10px">
+        <div class="hub-header" style="margin-bottom:4px">
+          <div class="hub-av" style="width:24px;height:24px;font-size:11px">S</div>
+          <div class="hub-title" style="font-size:12px">Supervisor &middot; ReAct Router</div>
+        </div>
+        <div class="react-inner" style="margin-bottom:4px">
+          <span class="react-step">THINK</span>
+          <span class="react-arr">&rarr;</span>
+          <span class="react-step">ACT</span>
+          <span class="react-arr">&rarr;</span>
+          <span class="react-step react-step-hc">6 Hard Constraints</span>
+        </div>
+        <div class="hub-sigs">
+          <span class="hub-sig hub-sig-up">Data Returns</span>
+          <span class="hub-sig hub-sig-dn">Dispatch</span>
+        </div>
+      </div>
+
+      <div class="fan-out" style="margin-top:4px;margin-bottom:1px">
+        <div class="fan-col"><div class="fan-lbl">CALL_RESEARCHER</div></div>
+        <div class="fan-col"><div class="fan-lbl">CALL_ANALYST</div></div>
+        <div class="fan-col fan-col-opt"><div class="fan-lbl">CALL_VALIDATOR</div></div>
+      </div>
+
+      <div class="agent-row" style="margin-top:8px">
+        <div class="ac" style="background:rgba(244,114,182,.05);border-color:rgba(244,114,182,.3)">
+          <div class="av" style="background:rgba(244,114,182,.18);color:#f472b6">A</div>
+          <div class="ai"><div class="an" style="color:#f472b6">Alex &middot; Researcher</div><div class="ar">market / competitive / tech / regulatory</div></div>
+        </div>
+        <div class="ac" style="background:rgba(167,139,250,.05);border-color:rgba(167,139,250,.3)">
+          <div class="av" style="background:rgba(167,139,250,.18);color:#a78bfa">J</div>
+          <div class="ai"><div class="an" style="color:#a78bfa">Jamie &middot; Analyst</div><div class="ar">TAM &middot; PESTEL &middot; Porter's</div></div>
+        </div>
+        <div class="ac" style="background:rgba(52,211,153,.05);border-color:rgba(52,211,153,.2);opacity:.82">
+          <div class="opt-lbl">opt</div>
+          <div class="av" style="background:rgba(52,211,153,.15);color:#34d399">J</div>
+          <div class="ai"><div class="an" style="color:#34d399">Jordan &middot; Synth</div><div class="ar">Web &harr; RAG</div></div>
+        </div>
+      </div>
+
+      <div class="ret-row" style="margin-top:3px">
+        <div class="ret-it">[Data]/[Estimate]</div>
+        <div class="ret-it ret-it-dn">Draft</div>
+        <div class="ret-it" style="color:#34d399">Reconciled</div>
+      </div>
+
+      <div style="display:flex;gap:4px;margin-top:1px">
+        <div class="arr-up" style="flex:1"><div class="arr-up-head"></div><div class="arr-up-line"></div></div>
+        <div class="arr-up" style="flex:1;opacity:.5"><div class="arr-up-head"></div><div class="arr-up-line"></div></div>
+        <div class="arr-up" style="flex:1;opacity:.25"></div>
+      </div>
+
+      <div class="deg-note" style="margin-top:3px">[UNAVAILABLE] &rarr; Analyst derives [Estimate] as fallback</div>
+
+      <div style="display:flex;gap:5px;align-items:stretch;margin-top:4px">
+        <div class="ac" style="flex:1;background:rgba(251,191,36,.05);border-color:rgba(251,191,36,.25);padding:5px 8px">
+          <div class="av" style="width:22px;height:22px;font-size:9px;background:rgba(251,191,36,.15);color:#fbbf24">M</div>
+          <div class="ai"><div class="an" style="font-size:10px;color:#fbbf24">Morgan &middot; Critic</div><div class="ar" style="font-size:8.5px">verdict routing</div></div>
+        </div>
+        <div class="v-split" style="flex:1">
+          <div class="v-ok">APPROVED &rarr; <b>Writer</b></div>
+          <div class="v-rev">NEEDS_REVISION &rarr; <b>Supervisor</b></div>
+          <div class="v-reroute">missing data &rarr; Researcher | logic error &rarr; Analyst</div>
+        </div>
+      </div>
+
+      <div class="v-arr-label">APPROVED</div>
+      <div class="arr-dn"><div class="arr-dn-line"></div><div class="arr-dn-head"></div></div>
+
+      <div class="ac" style="background:rgba(56,189,248,.05);border-color:rgba(56,189,248,.25);max-width:160px;margin:0 auto;padding:5px 8px">
+        <div class="av" style="width:22px;height:22px;font-size:9px;background:rgba(56,189,248,.15);color:#38bdf8">W</div>
+        <div class="ai"><div class="an" style="font-size:10px;color:#38bdf8">Writer</div><div class="ar" style="font-size:8.5px">GTM Report</div></div>
+      </div>
+    </div>
+
+    <!-- Right: Tech Stack + Innovations -->
+    <div style="padding:10px 12px;display:flex;flex-direction:column;gap:8px;overflow-y:auto;background:rgba(0,0,0,.15)">
+      <div class="sec">Tech Stack</div>
+      <div class="tg">
+        <div class="tg-head">API & Serving</div>
+        <div class="tr"><div class="td" style="background:#00d4aa"></div><div><div class="tn">FastAPI + WS</div><div class="ts">SSE streaming</div></div></div>
+        <div class="tr"><div class="td" style="background:#38bdf8"></div><div><div class="tn">Nginx</div><div class="ts">Reverse proxy</div></div></div>
+      </div>
+      <div class="tg">
+        <div class="tg-head">Knowledge & Retrieval</div>
+        <div class="tr"><div class="td" style="background:#a78bfa"></div><div><div class="tn">ChromaDB + LlamaIndex</div><div class="ts">Vector store</div></div></div>
+        <div class="tr"><div class="td" style="background:#34d399"></div><div><div class="tn">all-MiniLM-L6-v2</div><div class="ts">Local embeddings</div></div></div>
+        <div class="tr"><div class="td" style="background:#f472b6"></div><div><div class="tn">Semantic Cache</div><div class="ts">Topic similarity</div></div></div>
+      </div>
+      <div class="tg">
+        <div class="tg-head">LLM Backend</div>
+        <div class="tr"><div class="td" style="background:#fbbf24"></div><div><div class="tn">Doubao · DeepSeek</div><div class="ts">OpenAI-compatible</div></div></div>
+        <div class="tr"><div class="td" style="background:#64748b"></div><div><div class="tn">asyncio ThreadPool</div><div class="ts">4-dim parallel</div></div></div>
+      </div>
+
+      <div class="sec" style="margin-top:4px">Key Innovations</div>
+      <div class="hl"><div class="hl-n" style="font-size:12px">1</div><div class="hl-l">ReAct + Dual Budget</div><div class="hl-d">Independent Pre/Post-Analyst budgets prevent over-search</div></div>
+      <div class="hl"><div class="hl-n" style="font-size:12px">2</div><div class="hl-l">6 Hard Constraints</div><div class="hl-d">Deterministic safety net overrides LLM routing bias</div></div>
+      <div class="hl"><div class="hl-n" style="font-size:12px">3</div><div class="hl-l">Semantic Cache</div><div class="hl-d">Similar topic hit returns report instantly</div></div>
+      <div class="hl"><div class="hl-n" style="font-size:12px">4</div><div class="hl-l">Smart Routing</div><div class="hl-d">Industry research &rarr; pipeline; general &rarr; direct reply</div></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+async function exportNow(mode) {
+  const el = mode === 'landscape'
+    ? document.getElementById('slide')
+    : document.getElementById('slide-portrait');
+
+  const wasHidden = el.style.display === 'none';
+  if (wasHidden) {
+    el.style.display = 'flex';
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  const canvas = await html2canvas(el, {
+    scale: 2,
+    useCORS: true,
+    allowTaint: true,
+    backgroundColor: '#122440',
+    logging: false,
+  });
+
+  if (wasHidden) el.style.display = 'none';
+
+  const link = document.createElement('a');
+  link.download = mode === 'landscape'
+    ? 'gtm_architecture_4x3.png'
+    : 'gtm_architecture_3x4.png';
+  link.href = canvas.toDataURL('image/png');
+  link.click();
+}
+</script>
+</body>
+</html>

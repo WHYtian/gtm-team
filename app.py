@@ -69,6 +69,20 @@ app = FastAPI(title="GTM Team — OpenClaw Multi-Agent")
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 
+@app.on_event("startup")
+async def _warmup():
+    """Pre-load the embedding model in a background thread so first RAG query is instant."""
+    import concurrent.futures
+    def _load():
+        try:
+            from rag_mgr import _get_index
+            _get_index()
+        except Exception:
+            pass
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(concurrent.futures.ThreadPoolExecutor(max_workers=1), _load)
+
+
 # ── Session store ─────────────────────────────────────────────────────────────
 
 class Session:
@@ -240,10 +254,19 @@ async def _handle_chat(session: Session, user_msg: str):
             await q.put({"type": "supervisor_response", "content": resp_text})
 
         else:
-            CHAT_HISTORY.append({"role": "user",       "content": user_msg,   "ts": now()})
-            CHAT_HISTORY.append({"role": "supervisor",  "content": route_resp, "ts": now()})
+            GTM_INVITE = (
+                "\n\n---\n"
+                "*Want a full GTM intelligence report? Just name an industry or market. Examples:*\n"
+                "- *Cloud CRM software in North America*\n"
+                "- *China new energy vehicle (NEV) market*\n"
+                "- *Global HR SaaS competitive landscape*\n"
+                "- *Southeast Asia ride-hailing industry*"
+            )
+            display_resp = route_resp + GTM_INVITE
+            CHAT_HISTORY.append({"role": "user",       "content": user_msg,    "ts": now()})
+            CHAT_HISTORY.append({"role": "supervisor",  "content": display_resp, "ts": now()})
             _save_history(CHAT_HISTORY)
-            await q.put({"type": "supervisor_response", "content": route_resp})
+            await q.put({"type": "supervisor_response", "content": display_resp})
 
         await q.put({"type": "done"})
 
@@ -262,26 +285,132 @@ async def _handle_chat(session: Session, user_msg: str):
 
 @app.post("/api/upload")
 async def upload_to_kb(file: UploadFile = File(...), session_id: str = Form(...)):
-    """Add PDF/text to RAG knowledge base."""
+    """Add any supported document (PDF/TXT/XLSX/CSV/JSON/ZIP) to RAG knowledge base."""
     content = await file.read()
     filename = file.filename or "upload"
     session = SESSIONS.get(session_id)
+    ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
 
     async def run():
         try:
             from rag_mgr import extract_pdf_text, ingest_document
+            from team.skills import doc_import_bytes
+
             if session:
-                await session.q.put({"type": "upload_progress", "message": f"Extracting {filename}...", "filename": filename})
-            text = extract_pdf_text(content) if filename.lower().endswith(".pdf") else content.decode("utf-8", errors="ignore")
-            result = ingest_document(filename, text)
+                await session.q.put({"type": "upload_progress", "message": f"Processing {filename}...", "filename": filename})
+
+            if ext == "pdf":
+                text = extract_pdf_text(content)
+            elif ext in ("xlsx", "csv", "json", "zip"):
+                parsed = await doc_import_bytes(filename, content)
+                if "error" in parsed:
+                    if session:
+                        await session.q.put({"type": "upload_error", "message": parsed["error"]})
+                    return
+                text = parsed.get("text", "")
+            else:
+                try:
+                    text = content.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = content.decode("latin-1")
+
+            result = ingest_document(filename, text, namespace="user")
             if session:
-                await session.q.put({"type": "upload_done", "filename": filename, "chunks": result.get("chunks", 0), "words": result.get("words", 0)})
+                if "error" in result:
+                    await session.q.put({"type": "upload_error", "message": result["error"]})
+                else:
+                    await session.q.put({"type": "upload_done", "filename": filename, "chunks": result.get("chunks", 0), "words": result.get("words", 0)})
         except Exception as e:
             if session:
                 await session.q.put({"type": "upload_error", "message": str(e)})
 
     asyncio.create_task(run())
     return {"status": "processing", "filename": filename}
+
+
+@app.post("/api/import/files")
+async def import_files(files: list[UploadFile] = File(...), namespace: str = Form("user")):
+    """Batch import multiple files of any supported format into RAG."""
+    results = []
+
+    async def process_one(file: UploadFile) -> dict:
+        from rag_mgr import extract_pdf_text, ingest_document
+        from team.skills import doc_import_bytes
+
+        content = await file.read()
+        filename = file.filename or "import"
+        ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+
+        try:
+            if ext == "pdf":
+                text = extract_pdf_text(content)
+            elif ext in ("xlsx", "csv", "json", "zip"):
+                parsed = await doc_import_bytes(filename, content)
+                if "error" in parsed:
+                    return {"filename": filename, "status": "error", "error": parsed["error"]}
+                text = parsed.get("text", "")
+            else:
+                try:
+                    text = content.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = content.decode("latin-1")
+
+            result = ingest_document(filename, text, namespace=namespace)
+            ok = "error" not in result
+            return {"filename": filename, "status": ("ok" if ok else "error"), **result}
+        except Exception as e:
+            return {"filename": filename, "status": "error", "error": str(e)}
+
+    results = await asyncio.gather(*[process_one(f) for f in files])
+    return {"files": len(results), "results": results}
+
+
+def _is_safe_url(url: str) -> bool:
+    """Block SSRF: only allow public HTTP/HTTPS URLs, reject private/loopback hosts."""
+    import ipaddress
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url)
+        if p.scheme not in ("http", "https"):
+            return False
+        host = p.hostname or ""
+        if not host or host in ("localhost",):
+            return False
+        try:
+            addr = ipaddress.ip_address(host)
+            return addr.is_global and not addr.is_loopback and not addr.is_private
+        except ValueError:
+            return True  # hostname (not raw IP) — allow
+    except Exception:
+        return False
+
+
+@app.post("/api/import/url")
+async def import_url(url: str = Form(...), namespace: str = Form("user"), filename: str = Form("")):
+    """Scrape a URL and ingest its content into RAG."""
+    from team.skills import web_scrape
+    from rag_mgr import ingest_document
+
+    if not _is_safe_url(url):
+        return {"status": "error", "error": "URL not allowed (private/internal addresses are blocked)"}
+
+    text = await web_scrape(url)
+    if not text or len(text) < 50:
+        return {"status": "error", "error": "URL returned insufficient content", "url": url}
+
+    fname = filename or url.rstrip("/").rsplit("/", 1)[-1][:80] or "webpage"
+    result = ingest_document(fname + ".txt", text, source_type="url", namespace=namespace)
+    return {"status": "ok", "url": url, **result}
+
+
+@app.post("/api/rag/migrate")
+def migrate_namespace():
+    """One-time: add namespace metadata to existing chunks."""
+    try:
+        from rag_mgr import migrate_existing_namespace
+        return migrate_existing_namespace()
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.post("/api/analyze-doc")
@@ -393,12 +522,22 @@ def rag_stats():
 
 
 @app.get("/api/documents")
-def list_docs():
+def list_docs(namespace: str = ""):
     try:
         from rag_mgr import list_documents
-        return {"documents": list_documents()}
+        ns = namespace if namespace in ("user", "platform") else None
+        return {"documents": list_documents(namespace=ns)}
     except Exception:
         return {"documents": []}
+
+
+@app.get("/api/rag/namespaces")
+def rag_namespaces():
+    try:
+        from rag_mgr import list_namespaces
+        return {"namespaces": list_namespaces()}
+    except Exception as e:
+        return {"namespaces": [], "error": str(e)}
 
 
 @app.delete("/api/documents/{filename:path}")

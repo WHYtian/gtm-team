@@ -19,6 +19,7 @@ from pathlib import Path
 from team.agent import Agent, AgentCallError
 from team.personas import ANALYST, CRITIC, RESEARCHER, WRITER
 from team.skills import gather_dimension, web_search, web_scrape
+from team.telemetry import Telemetry
 
 REPORTS_DIR = Path.home() / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
@@ -158,7 +159,7 @@ def _parse_react(text: str) -> tuple[str, str, str]:
         return think, "CALL_ANALYST", "Continue analysis with available research data."
 
     action = act_m.group(1).upper()
-    param  = (act_m.group(2) or "").strip()[:800]
+    param  = (act_m.group(2) or "").strip()
     return think, action, param
 
 
@@ -217,6 +218,11 @@ def _build_ctx_for(agent_id: str, workspace: list) -> list[dict]:
         for r in (w for w in workspace if w["agent"] == "researcher"):
             msgs.append({"role": "user",
                          "content": f"[RESEARCH Round {r['round']}]\n{r['output']}"})
+        # Validator reconciliation (if it ran) — inject before critic feedback so analyst
+        # knows which figures are confirmed vs conflicted vs RAG-only supplements
+        for v in (w for w in workspace if w["agent"] == "validator"):
+            msgs.append({"role": "user",
+                         "content": f"[DATA RECONCILIATION]\n{v['output']}"})
         critics = [w for w in workspace if w["agent"] == "critic"]
         if critics:
             c = critics[-1]
@@ -250,6 +256,156 @@ def _build_ctx_for(agent_id: str, workspace: list) -> list[dict]:
 def _has_findings(text: str) -> bool:
     """True if researcher output contains at least one confidence-tagged finding."""
     return bool(re.search(r'\[(Data|Estimate|Claim)\]', text, re.IGNORECASE))
+
+
+# ── Data Synthesizer helpers ──────────────────────────────────────────────────
+
+# Files to exclude from synthesis (test / non-data uploads)
+_SYNTH_SKIP_FILES = re.compile(
+    r'^(test_|fe_path|ng_test|test_upload|test_single)', re.IGNORECASE)
+
+SIM_THRESHOLD = 0.42  # tuned: 100% recall on true-match pairs, 0 false noise at this value
+
+
+def _last_critic_verdict(workspace: list) -> tuple[str, dict | None]:
+    """Return (VERDICT_TYPE, critic_entry) from the most recent critic output."""
+    for w in reversed(workspace):
+        if w["agent"] == "critic":
+            m = re.search(r'\[VERDICT:\s*(APPROVED|NEEDS_REVISION|REJECT_DATA)',
+                          w["output"], re.IGNORECASE)
+            return (m.group(1).upper() if m else ""), w
+    return "", None
+
+
+def _researcher_after(workspace: list, after_round: int) -> bool:
+    """True if any researcher entry has round > after_round."""
+    return any(w["agent"] == "researcher" and w["round"] > after_round for w in workspace)
+
+
+def _get_user_rag_for_topic(topic: str) -> list[dict]:
+    """Return topic-relevant user-namespace RAG chunks as dicts (no test files)."""
+    try:
+        from rag_mgr import query_rag_multi
+        raw = query_rag_multi(
+            [f"{topic} {dq}" for _, dq in RESEARCH_DIMS],
+            n_per_query=3,
+            namespace_filter="user",
+        )
+        chunks = []
+        for block in raw.split("\n\n---\n\n"):
+            block = block.strip()
+            if not block:
+                continue
+            m = re.match(r'^\[([^\]]+)\]\n(.*)', block, re.DOTALL)
+            if m:
+                fname = m.group(1).strip()
+                if _SYNTH_SKIP_FILES.match(fname):
+                    continue
+                text = m.group(2).strip()
+                if len(text) >= 40:
+                    chunks.append({"text": text[:400], "filename": fname})
+        return chunks
+    except Exception:
+        return []
+
+
+def _extract_finding_texts(workspace: list) -> list[str]:
+    """Extract all confidence-tagged finding lines from researcher workspace entries.
+
+    Returns deduplicated list of clean strings (URLs stripped, max 220 chars each).
+    """
+    seen, findings = set(), []
+    for w in workspace:
+        if w["agent"] != "researcher":
+            continue
+        for line in w["output"].split('\n'):
+            sl = line.strip()
+            if not re.search(r'\[(Data|Estimate|Claim)\]', sl, re.IGNORECASE):
+                continue
+            # Strip URLs and artifacts
+            clean = re.sub(r'\(https?://[^\)]+\)', '', sl)
+            clean = re.sub(r'\(not provided\)', '', clean)
+            clean = re.sub(r'^[-•*\s]+', '', clean).strip()[:220]
+            if len(clean) < 20:
+                continue
+            key = clean[:80].lower()
+            if key not in seen:
+                seen.add(key)
+                findings.append(clean)
+    return findings
+
+
+def _get_user_rag_chunks() -> list[dict]:
+    """Return all meaningful user-namespace RAG chunks (test files excluded)."""
+    try:
+        from rag_mgr import _get_index
+        idx = _get_index()
+        col = idx._vector_store._collection
+        res = col.get(where={"namespace": "user"}, include=["documents", "metadatas"])
+        chunks = []
+        for doc, meta in zip(res["documents"], res["metadatas"]):
+            fname = meta.get("filename", "")
+            if _SYNTH_SKIP_FILES.match(fname):
+                continue
+            text = doc.strip()
+            if len(text) < 40:
+                continue
+            chunks.append({
+                "text":      text[:400],
+                "filename":  fname,
+                "chunk_idx": meta.get("chunk_index", 0),
+            })
+        return chunks
+    except Exception:
+        return []
+
+
+def _embed_pair_match(
+    findings: list[str],
+    rag_chunks: list[dict],
+    threshold: float = SIM_THRESHOLD,
+) -> tuple[list[dict], list[dict]]:
+    """Embedding-based pre-filter: returns (matched_pairs, rag_supplements).
+
+    matched_pairs  — RAG chunks whose max cosine similarity to any finding ≥ threshold.
+                     Each entry includes the best-matching finding text and the sim score.
+    rag_supplements — RAG chunks with max_sim < threshold (researcher didn't find this).
+
+    Uses the already-loaded HuggingFace embedding model — no LLM calls, pure numpy.
+    """
+    if not findings or not rag_chunks:
+        return [], rag_chunks
+
+    try:
+        import numpy as np
+        from rag_mgr import _get_embed
+
+        embed = _get_embed()
+        f_embs = np.array(embed.get_text_embedding_batch(findings))   # (N, D)
+        r_embs = np.array(embed.get_text_embedding_batch(
+            [c["text"] for c in rag_chunks]))                          # (M, D)
+
+        # Cosine similarity matrix (N, M)
+        f_norm = f_embs / (np.linalg.norm(f_embs, axis=1, keepdims=True) + 1e-9)
+        r_norm = r_embs / (np.linalg.norm(r_embs, axis=1, keepdims=True) + 1e-9)
+        sim_matrix = f_norm @ r_norm.T  # (N, M)
+
+        matched, supplements = [], []
+        for j, chunk in enumerate(rag_chunks):
+            col_sims = sim_matrix[:, j]
+            best_f_idx = int(np.argmax(col_sims))
+            max_sim = float(col_sims[best_f_idx])
+            if max_sim >= threshold:
+                matched.append({
+                    **chunk,
+                    "best_finding": findings[best_f_idx],
+                    "sim":          round(max_sim, 3),
+                })
+            else:
+                supplements.append(chunk)
+        return matched, supplements
+    except Exception:
+        return [], rag_chunks
 
 
 # ── Web helpers ───────────────────────────────────────────────────────────────
@@ -392,7 +548,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
         safe = "".join(c if c.isalnum() or c in "-_ " else "_" for c in topic)[:40]
         (REPORTS_DIR / f"gtm_{safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md").write_text(
             cache_hit["report"], encoding="utf-8")
-        return {"report": cache_hit["report"], "topic": topic}
+        return {"report": cache_hit["report"], "topic": topic, "team_messages": team_messages}
 
     stale_report = stale_entry_id = stale_age = None
     if cache_hit and cache_hit["hit"] == "stale":
@@ -403,13 +559,36 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
             cache_hit["report"], cache_hit["entry_id"], cache_hit["age_days"])
 
     # ── State ─────────────────────────────────────────────────────────────────
+    tel = Telemetry(topic)
+
     workspace:                    list[dict] = []
     rag_context                   = ""
+    user_rag_chunks:              list[dict] = []   # topic-relevant user-namespace chunks
     researcher_calls              = 0
     post_analyst_researcher_calls = 0
     analyst_called                = False
+    validator_called              = False
     revision_count                = 0
     final_report                  = ""
+
+    # ── Telemetry helpers ─────────────────────────────────────────────────────
+    def _tel_record(agent):
+        s = agent.last_call_stats
+        tel.record_call(rnd, agent.agent_id, agent.model,
+                        s["in_chars"], s["out_chars"], s["duration_s"])
+
+    def _start_res(call_type: str):
+        tel.start_researcher_round(rnd, call_type)
+
+    def _finish_res(queries_gen: int, findings: int, unavail: int,
+                    retries: int, rag_chunks: int):
+        if tel._cur_res:
+            tel._cur_res.queries_generated     = queries_gen
+            tel._cur_res.queries_with_findings = findings
+            tel._cur_res.queries_unavailable   = unavail
+            tel._cur_res.semantic_retries      = retries
+            tel._cur_res.rag_chunks_found      = rag_chunks
+        tel.finish_researcher_round()
 
     await emit(react_supervisor,
         f"🚀 **Starting: {topic}**\n\n"
@@ -481,6 +660,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         workspace=_workspace_text(workspace),
                     ),
                     max_tokens=600, remember=False)
+                _tel_record(react_supervisor)
             except AgentCallError as e:
                 await emit_error(f"Supervisor failed: {e}")
                 # Sensible fallback based on current state
@@ -493,6 +673,25 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 think_txt = ""
             else:
                 think_txt, action, param = _parse_react(react_raw)
+                # Hard constraints 4 & 5: enforce critic routing rules deterministically.
+                # Applied first so budget constraints (constraint 1) can still apply after.
+                last_verdict, last_critic_w = _last_critic_verdict(workspace)
+                if last_critic_w:
+                    followed_up = _researcher_after(workspace, last_critic_w["round"])
+                    if last_verdict == "REJECT_DATA" and not followed_up:
+                        # REJECT_DATA must route to researcher first (if budget available)
+                        if action != "CALL_RESEARCHER" and post_analyst_researcher_calls < MAX_POST_ANALYST_RESEARCHER:
+                            action = "CALL_RESEARCHER"
+                            sq_m = re.search(r'search:\s*([^\]\n]+)', last_critic_w["output"], re.IGNORECASE)
+                            param = (f"Find alternative source: {sq_m.group(1).strip()[:200]}"
+                                     if sq_m else "Find alternative source for the figure rejected by critic.")
+                    elif last_verdict == "NEEDS_REVISION" and not followed_up:
+                        reason_m = re.search(r'reason:\s*(\w+)', last_critic_w["output"], re.IGNORECASE)
+                        reason = reason_m.group(1).lower() if reason_m else ""
+                        # logic_error must go to analyst — never researcher
+                        if reason == "logic_error" and action == "CALL_RESEARCHER":
+                            action = "CALL_ANALYST"
+                            param = param or "Fix the logical errors in the framework or arithmetic flagged by critic."
                 # Hard constraint 1: enforce researcher budget limits
                 if action == "CALL_RESEARCHER":
                     pre_exhausted  = not analyst_called and researcher_calls >= MAX_RESEARCHER_CALLS
@@ -519,6 +718,12 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     action = "CALL_WRITER"
                     param  = ("Analyst has been revised twice. Write the final report using the "
                               "best available analysis. Label any unresolved issues inline.")
+                # Hard constraint 0: run Data Synthesizer before the very first analyst call
+                # if user-uploaded RAG data exists (no-op if no user docs).
+                if action == "CALL_ANALYST" and not analyst_called and not validator_called:
+                    if user_rag_chunks:  # populated during initial research — no async call needed
+                        action = "CALL_VALIDATOR"
+                        param  = "Reconcile web search findings with imported knowledge base."
 
             if think_txt:
                 await emit(react_supervisor, think_txt, "thinking", is_think=True)
@@ -528,6 +733,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 "CALL_ANALYST":    f"Calling **Jamie (Analyst)** — {param}",
                 "CALL_CRITIC":     f"Calling **Morgan (Critic)** — {param}",
                 "CALL_WRITER":     "Calling **Report Writer** — producing final report",
+                "CALL_VALIDATOR":  "Calling **Jordan (Synthesizer)** — reconciling web vs imported data",
             }
             await emit(react_supervisor,
                 f"▶ {_labels.get(action, action)}", "routing")
@@ -539,6 +745,80 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
 
         sig    = ""
         output = ""
+
+        # ── VALIDATOR (Data Synthesizer) ──────────────────────────────────────
+        if action == "CALL_VALIDATOR":
+            from team.personas import DATA_SYNTHESIZER
+            synthesizer = Agent(**DATA_SYNTHESIZER)
+
+            # Step 1: extract all researcher findings (full list, not digest-truncated)
+            all_findings = _extract_finding_texts(workspace)
+
+            # Step 2: use topic-relevant user chunks already fetched during initial research
+            # (avoids comparing against unrelated docs; avoids a redundant blocking DB call)
+            rag_chunks = user_rag_chunks
+
+            if all_findings and rag_chunks:
+                # Step 3: embedding-based pre-filter (pure numpy, no LLM)
+                matched, supplements = await loop.run_in_executor(
+                    None, _embed_pair_match, all_findings, rag_chunks, SIM_THRESHOLD)
+
+                # Step 4: build compact LLM input (only matched pairs + supplements)
+                pairs_block = ""
+                for p in matched:
+                    pairs_block += (
+                        f"\n[OVERLAP — sim={p['sim']}]\n"
+                        f"  Web finding : {p['best_finding'][:220]}\n"
+                        f"  RAG chunk   : [{p['filename']}] {p['text'][:220]}\n"
+                    )
+
+                supps_block = ""
+                for c in supplements[:15]:   # cap at 15 to avoid context overflow
+                    supps_block += f"\n[RAG-ONLY — {c['filename']}]\n  {c['text'][:200]}\n"
+
+                await emit(synthesizer,
+                    f"🔄 **Data Reconciliation** — {len(matched)} overlap pairs, "
+                    f"{len(supplements)} RAG supplements\n"
+                    f"Embedding threshold: {SIM_THRESHOLD} | Findings scanned: {len(all_findings)} | "
+                    f"RAG chunks: {len(rag_chunks)}",
+                    "validation")
+
+                synth_input = (
+                    f"Research topic: {topic}\n\n"
+                    f"OVERLAP PAIRS (embedding similarity ≥ {SIM_THRESHOLD}):\n"
+                    f"{pairs_block or '(none — web and RAG cover different metrics)'}\n\n"
+                    f"RAG SUPPLEMENTS (imported data not covered by web search):\n"
+                    f"{supps_block or '(none)'}"
+                )
+
+                try:
+                    result = await synthesizer.speak(
+                        synth_input, max_tokens=800, remember=False)
+                    _tel_record(synthesizer)
+                    s = synthesizer.last_call_stats
+                    tel.record_synth(result, s["in_chars"], s["duration_s"])
+                except AgentCallError as e:
+                    await emit_error(f"Data Synthesizer failed: {e}", synthesizer)
+                    result = "[SYNTHESIS: SKIPPED — error]"
+                tel.synth.web_findings = len(all_findings)
+                tel.synth.rag_chunks   = len(rag_chunks)
+                tel.synth.matched_pairs    = len(matched)
+                tel.synth.supplements      = len(supplements)
+            else:
+                result = (
+                    f"[SYNTHESIS: SKIPPED — "
+                    f"{'no researcher findings yet' if not all_findings else 'no user RAG data'}]"
+                )
+
+            await emit(synthesizer, result, "validation")
+            validator_called = True
+            sig = "[SYNTHESIS: COMPLETE]" if "SYNTHESIS: COMPLETE" in result else ""
+            workspace.append({
+                "round": rnd, "agent": "validator",
+                "task": "reconcile web vs RAG", "output": result, "signal": sig,
+            })
+            # Immediately route to analyst (validator is not a terminal action)
+            continue
 
         # ── WRITER ───────────────────────────────────────────────────────────
         if action == "CALL_WRITER":
@@ -559,6 +839,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 result = await writer.speak(
                     f"Supervisor instruction: {param}{rag_note}",
                     extra_context=_writer_ctx, max_tokens=3000)
+                _tel_record(writer)
             except AgentCallError as e:
                 await emit_error(f"Report Writer failed: {e}", writer)
                 result = ""
@@ -583,28 +864,34 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
 
             if researcher_calls == 1:
                 # Initial parallel search across 4 dimensions
+                _start_res("initial (4-dim)")
+                _res_c = {"queries": 4, "findings": 0, "unavail": 0, "retries": 0}
                 await emit(researcher,
                     f"🔍 **Initial research: *{topic}***\n"
                     "Launching parallel searches across 4 dimensions...", "research")
 
-                dim_tasks  = [gather_dimension(topic, dk, dq) for dk, dq in RESEARCH_DIMS]
-                rag_task   = loop.run_in_executor(None, _get_rag, topic)
-                dim_results, rag_ctx = await asyncio.gather(
-                    asyncio.gather(*dim_tasks), rag_task)
+                dim_tasks       = [gather_dimension(topic, dk, dq) for dk, dq in RESEARCH_DIMS]
+                rag_task        = loop.run_in_executor(None, _get_rag, topic)
+                user_rag_task   = loop.run_in_executor(None, _get_user_rag_for_topic, topic)
+                dim_results, rag_ctx, user_rag_new = await asyncio.gather(
+                    asyncio.gather(*dim_tasks), rag_task, user_rag_task)
 
                 rag_context = rag_ctx
+                user_rag_chunks = user_rag_new
                 summaries: dict[str, str] = {}
 
                 async def _summarize_dim(dr: dict) -> tuple[str, str]:
                     dim, raw = dr["dimension"], dr["text"]
 
                     async def _do_dim_summarize(content: str) -> str:
-                        return await researcher.speak(
+                        r = await researcher.speak(
                             f'Summarise web data about "{topic}" — {dim.replace("_", " ")}.\n\n'
                             f'{content[:3000]}\n\n'
                             "Use TEMPLATE A (Key Findings + Synthesis + Gaps + Confidence). "
                             "Start immediately with ## — no preamble.",
                             max_tokens=550, remember=False)
+                        _tel_record(researcher)
+                        return r
 
                     try:
                         s = await _do_dim_summarize(raw)
@@ -612,14 +899,19 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         await emit_error(f"Researcher failed on {dim}: {e}", researcher)
                         return dim, f"⚠️ Researcher error for {dim}: {e}"
 
+                    if _has_findings(s):
+                        _res_c["findings"] += 1
+
                     # Semantic retry: if no citable findings, try a different search angle
                     if not _has_findings(s):
+                        _res_c["retries"] += 1
                         try:
                             alt_q_raw = await researcher.speak(
                                 f'Search for "{topic} — {dim.replace("_", " ")}" found no citable data.\n'
                                 f'Suggest ONE alternative search query (keywords only, max 12 words) '
                                 f'to find {dim.replace("_", " ")} data for "{topic}" from a completely different angle.',
                                 max_tokens=80, remember=False)
+                            _tel_record(researcher)
                             alt_q = (alt_q_raw.strip().split('\n')[0]
                                      .lstrip("•-0123456789.) ").strip()[:200])
                         except AgentCallError:
@@ -632,8 +924,15 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                                     s2 = await _do_dim_summarize(alt_dr["text"])
                                     if _has_findings(s2):
                                         s = s2  # retry found citable data
+                                        _res_c["findings"] += 1
+                                    else:
+                                        _res_c["unavail"] += 1
                                 except AgentCallError:
-                                    pass  # keep original s
+                                    _res_c["unavail"] += 1
+                            else:
+                                _res_c["unavail"] += 1
+                        else:
+                            _res_c["unavail"] += 1
 
                     return dim, s
 
@@ -658,6 +957,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         f"Review summaries for \"{topic}\" and emit a signal:\n\n{output[:2000]}\n\n"
                         "Use TEMPLATE C. Reply with ONLY the signal line.",
                         max_tokens=200, remember=False)
+                    _tel_record(researcher)
                 except AgentCallError as e:
                     sig_raw = "[RESEARCH: WEAK | gaps: signal check failed]"
                     await emit_error(f"Researcher signal check failed: {e}", researcher)
@@ -667,10 +967,15 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 await emit(researcher,
                     f"📊 Initial research complete. Signal: `{sig}`", "research")
 
+                _finish_res(_res_c["queries"], _res_c["findings"],
+                            _res_c["unavail"], _res_c["retries"],
+                            len(user_rag_chunks))
                 task_label = "initial"
 
             else:
                 # Follow-up search: researcher self-decomposes supervisor's directive
+                _start_res(f"follow-up #{researcher_calls}")
+                _res_c = {"queries": 0, "findings": 0, "unavail": 0, "retries": 0}
                 directive = param.strip() or topic
 
                 last_critic = next(
@@ -693,22 +998,26 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         f"Never generate 2 queries for the same entity.\n"
                         f"  3. Add market-level queries (size, CAGR) ONLY if the directive "
                         f"explicitly requests market size or growth rate data.\n"
-                        f"  4. Total queries = number of entities + market queries (if requested). "
-                        f"No arbitrary cap — ensure every entity is covered.\n"
-                        f"Example: directive names 6 companies → 6 queries, one per company.\n"
+                        f"  4. Hard cap: maximum 8 queries total. If entities exceed 8, "
+                        f"prioritise: (a) entities most directly named in the directive, "
+                        f"(b) market-level queries last. Drop the least critical ones.\n"
+                        f"Example: directive names 6 companies → 6 queries (one per company) + "
+                        f"up to 2 market queries if requested.\n"
                         f"Include '2025' or '2026' in queries where current data is needed.\n"
                         f"Format: one search query per line, keywords only (max 12 words each), "
                         f"no bullets or numbers.",
                         max_tokens=400, remember=False)
+                    _tel_record(researcher)
                     queries = [
                         ln.strip().lstrip("•-0123456789.) ")
                         for ln in decompose_raw.split("\n")
                         if ln.strip() and not ln.strip().startswith("#") and len(ln.strip()) > 5
-                    ][:16]  # raised from 8 → 16 to accommodate large entity lists
+                    ][:8]
                 except AgentCallError:
                     queries = []
                 if not queries:
                     queries = [directive]
+                _res_c["queries"] = len(queries)
 
                 n = len(queries)
                 await emit(researcher,
@@ -737,7 +1046,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
 
                     async def _do_query_summarize(q: str, t: str, src: str,
                                                   extra: str = "") -> str:
-                        return await researcher.speak(
+                        r = await researcher.speak(
                             f"Research task: {q}{critic_ctx}\n\n"
                             f"Sources:\n{src}\n\n"
                             f"Content:\n{t[:1800]}{extra}\n\n"
@@ -747,6 +1056,8 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                             "Cite source URLs. Prefer 2025 sources; note year for all figures. "
                             "End with signal.",
                             max_tokens=550, remember=False)
+                        _tel_record(researcher)
+                        return r
 
                     s = ""
                     if text or sources:
@@ -756,16 +1067,22 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                             await emit_error(f"Researcher failed on '{query}': {e}", researcher)
                             s = (f"## 🔍 — {query}\n\n**Found:** Error\n\n"
                                  f"[RESEARCH: WEAK | gaps: summarisation error]")
+                            _res_c["unavail"] += 1
                             return s
+
+                    if _has_findings(s):
+                        _res_c["findings"] += 1
 
                     # Semantic retry: if no citable findings, try a different search angle
                     if not _has_findings(s):
+                        _res_c["retries"] += 1
                         try:
                             alt_q_raw = await researcher.speak(
                                 f'Search for "{query}" found no citable data.\n'
                                 f'Suggest ONE alternative search query (keywords only, max 12 words) '
                                 f'to find this from a completely different angle.',
                                 max_tokens=60, remember=False)
+                            _tel_record(researcher)
                             alt_q = (alt_q_raw.strip().split('\n')[0]
                                      .lstrip("•-0123456789.) ").strip()[:200])
                         except AgentCallError:
@@ -778,11 +1095,13 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                                 try:
                                     s2 = await _do_query_summarize(alt_q, alt_sr["text"], alt_src)
                                     if _has_findings(s2):
+                                        _res_c["findings"] += 1
                                         return s2  # retry found citable data
                                 except AgentCallError:
                                     pass
 
                         # Both attempts exhausted — return definitive UNAVAILABLE
+                        _res_c["unavail"] += 1
                         return (f"## 🔍 — {query}\n\n**Found:** Nothing after retry\n\n"
                                 f"**Not found:** {query}\n\n**Plausibility:** N/A\n\n"
                                 f"**Summary:** No citable data found after two search attempts.\n\n"
@@ -814,6 +1133,10 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                         f"`[RESEARCH: UNAVAILABLE | data: {directive[:80]}]`",
                         "research")
 
+                _finish_res(_res_c["queries"], _res_c["findings"],
+                            _res_c["unavail"], _res_c["retries"],
+                            len(user_rag_chunks))
+
         # ── ANALYST / CRITIC ──────────────────────────────────────────────────
         else:
             agent_id   = {"CALL_ANALYST": "analyst", "CALL_CRITIC": "critic"}[action]
@@ -835,6 +1158,9 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                     extra_context=ctx,
                     max_tokens=max_tokens_map[agent_id],
                     remember=False)
+                _tel_record(agent)
+                if agent_id == "critic":
+                    tel.record_critic(rnd, result)
                 await emit(agent, result, exec_phase)
                 output = result
             except AgentCallError as e:
@@ -885,6 +1211,7 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
                 f"Write the complete GTM Intelligence Report for: {topic}. "
                 f"Use all available research and analysis data.{rag_note}",
                 extra_context=ctx, max_tokens=3000)
+            _tel_record(writer)
             final_report = emergency_report
             await emit(writer, emergency_report, "writing")
             workspace.append({
@@ -905,10 +1232,22 @@ async def run_research(topic: str, q: asyncio.Queue) -> dict:
     await emit(react_supervisor,
         f"🎉 **Complete — {topic}**\n\n{len(workspace)} rounds · {stats}", "complete")
 
+    # ── Telemetry ─────────────────────────────────────────────────────────────
+    tel.cache_hit              = bool(cache_hit and cache_hit["hit"] in ("fresh", "stale"))
+    tel.total_rounds           = rnd
+    tel.researcher_calls_pre   = researcher_calls
+    tel.researcher_calls_post  = post_analyst_researcher_calls
+    tel.analyst_revisions      = revision_count
+    try:
+        await loop.run_in_executor(None, tel.save_markdown)
+    except Exception:
+        pass
+
     safe   = "".join(c if c.isalnum() or c in "-_ " else "_" for c in topic)[:40]
     ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     (REPORTS_DIR / f"gtm_{safe}_{ts_str}.md").write_text(final_report, encoding="utf-8")
-    await loop.run_in_executor(None, lambda: cache_store(topic, topic, final_report, stale_entry_id))
+    if final_report and final_report != "Report generation incomplete.":
+        await loop.run_in_executor(None, lambda: cache_store(topic, topic, final_report, stale_entry_id))
     return {"report": final_report, "topic": topic, "team_messages": team_messages}
 
 
