@@ -365,11 +365,34 @@ async def import_files(files: list[UploadFile] = File(...), namespace: str = For
     return {"files": len(results), "results": results}
 
 
+def _is_safe_url(url: str) -> bool:
+    """Block SSRF: only allow public HTTP/HTTPS URLs, reject private/loopback hosts."""
+    import ipaddress
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url)
+        if p.scheme not in ("http", "https"):
+            return False
+        host = p.hostname or ""
+        if not host or host in ("localhost",):
+            return False
+        try:
+            addr = ipaddress.ip_address(host)
+            return addr.is_global and not addr.is_loopback and not addr.is_private
+        except ValueError:
+            return True  # hostname (not raw IP) — allow
+    except Exception:
+        return False
+
+
 @app.post("/api/import/url")
 async def import_url(url: str = Form(...), namespace: str = Form("user"), filename: str = Form("")):
     """Scrape a URL and ingest its content into RAG."""
     from team.skills import web_scrape
     from rag_mgr import ingest_document
+
+    if not _is_safe_url(url):
+        return {"status": "error", "error": "URL not allowed (private/internal addresses are blocked)"}
 
     text = await web_scrape(url)
     if not text or len(text) < 50:
