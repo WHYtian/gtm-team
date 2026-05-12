@@ -2,8 +2,6 @@
 
 A production multi-agent system that takes an industry or market as input and autonomously produces a structured GTM intelligence report. Built with Python asyncio, FastAPI, and a custom ReAct orchestration framework.
 
-**Live:** `http://47.84.139.146` · WebSocket streaming · Real-time agent traces
-
 ---
 
 ## Architecture

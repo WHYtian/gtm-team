@@ -79,8 +79,8 @@ async def _warmup():
             _get_index()
         except Exception:
             pass
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(concurrent.futures.ThreadPoolExecutor(max_workers=1), _load)
+    asyncio.get_running_loop().run_in_executor(
+        concurrent.futures.ThreadPoolExecutor(max_workers=1), _load)
 
 
 # ── Session store ─────────────────────────────────────────────────────────────
@@ -148,6 +148,12 @@ async def ws_endpoint(ws: WebSocket, sid: str):
             if data.get("type") == "chat":
                 msg = data.get("message", "").strip()
                 if msg:
+                    if session.current_task and not session.current_task.done():
+                        session.current_task.cancel()
+                        try:
+                            await session.current_task
+                        except (asyncio.CancelledError, Exception):
+                            pass
                     await session.send({"type": "user_message", "content": msg})
                     task = asyncio.create_task(_handle_chat(session, msg))
                     session.current_task = task
