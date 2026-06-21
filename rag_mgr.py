@@ -677,9 +677,6 @@ def query_rag(
         relevant.append(n)
 
     if not relevant:
-        relevant = nodes[:2] if nodes else []
-
-    if not relevant:
         return ""
 
     parts = []
